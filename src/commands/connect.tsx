@@ -24,6 +24,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const managerRef = useRef<OpenConnectManager | null>(null);
   const phaseRef = useRef<Phase>('resolving');
+  const sudoDoneRef = useRef(false);
   phaseRef.current = phase;
 
   // Resolve profile and check if already connected
@@ -81,21 +82,30 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       }
     }, CONNECTION_TIMEOUT_MS);
 
+    const sendKeychainPassword = () => {
+      try {
+        const pw = getKeychainPassword(profile.username, profile.keychainService);
+        manager.sendInput(pw);
+        setPhase('authenticating');
+      } catch (e: any) {
+        setError(e.message);
+        setPhase('failed');
+        manager.disconnect();
+      }
+    };
+
     manager.on('state', (state, message) => {
       switch (state) {
         case 'waiting-sudo':
-          setPhase('sudo');
+          if (sudoDoneRef.current) {
+            // After sudo is done, any "Password:" is a VPN password prompt
+            sendKeychainPassword();
+          } else {
+            setPhase('sudo');
+          }
           break;
         case 'authenticating':
-          try {
-            const pw = getKeychainPassword(profile.username, profile.keychainService);
-            manager.sendInput(pw);
-            setPhase('authenticating');
-          } catch (e: any) {
-            setError(e.message);
-            setPhase('failed');
-            manager.disconnect();
-          }
+          sendKeychainPassword();
           break;
         case 'waiting-otp':
           setPhase('otp');
@@ -141,6 +151,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
 
   const handleSudoSubmit = (value: string) => {
     managerRef.current?.sendInput(value);
+    sudoDoneRef.current = true;
     setSudoPassword('');
     setPhase('authenticating');
   };
