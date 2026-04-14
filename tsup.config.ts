@@ -7,5 +7,5 @@ export default defineConfig({
   target: 'node18',
   banner: { js: '#!/usr/bin/env node' },
   clean: true,
-  external: ['node-pty'],
+  external: ['node-pty', 'react-devtools-core', 'ink', 'react', 'commander', 'signal-exit'],
 });
