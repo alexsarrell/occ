@@ -51,9 +51,9 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     setPhase('starting');
   }, [profileName]);
 
-  // Start connection once profile is resolved
+  // Start connection once profile is resolved (runs once when profile is set)
   useEffect(() => {
-    if (!profile || phase !== 'starting') return;
+    if (!profile) return;
 
     const manager = new OpenConnectManager();
     managerRef.current = manager;
@@ -130,7 +130,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       process.off('SIGTERM', handleSignal);
       cleanup();
     };
-  }, [profile, phase]);
+  }, [profile]);
 
   // Handle q to disconnect in connected state
   useInput((input) => {
