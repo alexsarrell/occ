@@ -39,6 +39,11 @@ export function parseOpenConnectOutput(data: string): ParseResult | null {
     return { state: 'waiting-otp' };
   }
 
+  // Reconnecting
+  if (/(?:reconnect|session terminated)/i.test(data)) {
+    return { state: 'reconnecting' };
+  }
+
   // Successful connection
   if (/(?:got connect response|connected as|esp session established|dtls connection established)/i.test(data)) {
     return { state: 'connected' };

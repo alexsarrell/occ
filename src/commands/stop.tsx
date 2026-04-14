@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Text, useApp } from 'ink';
 import { execFileSync } from 'node:child_process';
+import { stopOrphanedCaffeinate } from '../core/caffeinate.js';
+import { resetDns } from '../core/dns.js';
 
 export function StopScreen() {
   const { exit } = useApp();
@@ -19,13 +21,14 @@ export function StopScreen() {
         for (const pid of pids) {
           process.kill(Number(pid), 'SIGTERM');
         }
+        stopOrphanedCaffeinate();
+        resetDns();
         setResult({ success: true, message: 'VPN disconnected' });
       }
     } catch {
       setResult({ success: false, message: 'VPN is not running' });
     }
 
-    // Exit after a short delay to let Ink render
     setTimeout(() => exit(), 100);
   }, []);
 

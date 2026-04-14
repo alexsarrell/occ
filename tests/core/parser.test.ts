@@ -58,6 +58,14 @@ describe('parseOpenConnectOutput', () => {
     expect(parseOpenConnectOutput('Login denied')).toEqual({ state: 'failed', message: 'Authentication failed' });
   });
 
+  it('detects reconnecting (reconnect keyword)', () => {
+    expect(parseOpenConnectOutput('Reconnecting to vpn.example.com')).toEqual({ state: 'reconnecting' });
+  });
+
+  it('detects reconnecting (session terminated)', () => {
+    expect(parseOpenConnectOutput('Session terminated; attempting to reconnect')).toEqual({ state: 'reconnecting' });
+  });
+
   it('returns null for unrecognized output', () => {
     expect(parseOpenConnectOutput('some random log line')).toBeNull();
   });

@@ -11,7 +11,9 @@ import { StatusBadge } from '../components/StatusBadge.js';
 import type { Profile } from '../config/types.js';
 import { execFileSync } from 'node:child_process';
 
-type Phase = 'resolving' | 'starting' | 'sudo' | 'authenticating' | 'otp' | 'connected' | 'failed';
+type Phase = 'resolving' | 'starting' | 'sudo' | 'authenticating' | 'otp' | 'connected' | 'reconnecting' | 'failed';
+
+const CONNECTION_TIMEOUT_MS = 90_000;
 
 export function ConnectScreen({ profileName }: { profileName?: string }) {
   const { exit } = useApp();
@@ -21,6 +23,8 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
   const [otpCode, setOtpCode] = useState('');
   const [profile, setProfile] = useState<Profile | null>(null);
   const managerRef = useRef<OpenConnectManager | null>(null);
+  const phaseRef = useRef<Phase>('resolving');
+  phaseRef.current = phase;
 
   // Resolve profile and check if already connected
   useEffect(() => {
@@ -54,6 +58,29 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     const manager = new OpenConnectManager();
     managerRef.current = manager;
 
+    const cleanup = () => {
+      manager.disconnect();
+      stopCaffeinate();
+      resetDns();
+    };
+
+    // Signal handlers for graceful shutdown on Ctrl+C / kill
+    const handleSignal = () => {
+      cleanup();
+      process.exit(0);
+    };
+    process.on('SIGINT', handleSignal);
+    process.on('SIGTERM', handleSignal);
+
+    // Connection timeout (90s)
+    const timeout = setTimeout(() => {
+      if (phaseRef.current !== 'connected') {
+        setError('Connection timed out (90s)');
+        setPhase('failed');
+        manager.disconnect();
+      }
+    }, CONNECTION_TIMEOUT_MS);
+
     manager.on('state', (state, message) => {
       switch (state) {
         case 'waiting-sudo':
@@ -74,14 +101,20 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
           setPhase('otp');
           break;
         case 'connected':
+          clearTimeout(timeout);
           setPhase('connected');
           startCaffeinate();
           break;
+        case 'reconnecting':
+          setPhase('reconnecting');
+          break;
         case 'failed':
+          clearTimeout(timeout);
           setError(message ?? 'Connection failed');
           setPhase('failed');
           break;
         case 'disconnected':
+          clearTimeout(timeout);
           stopCaffeinate();
           resetDns();
           exit();
@@ -92,15 +125,16 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     manager.connect(profile);
 
     return () => {
-      manager.disconnect();
-      stopCaffeinate();
-      resetDns();
+      clearTimeout(timeout);
+      process.off('SIGINT', handleSignal);
+      process.off('SIGTERM', handleSignal);
+      cleanup();
     };
   }, [profile, phase]);
 
   // Handle q to disconnect in connected state
   useInput((input) => {
-    if (input === 'q' && phase === 'connected') {
+    if (input === 'q' && (phase === 'connected' || phase === 'reconnecting')) {
       managerRef.current?.disconnect();
     }
   });
@@ -160,6 +194,16 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
             onChange={setOtpCode}
             onSubmit={handleOtpSubmit}
           />
+        </Box>
+      )}
+
+      {phase === 'reconnecting' && (
+        <Box flexDirection="column">
+          <Box>
+            <StatusBadge status="connecting" />
+            <Text> Reconnecting to {profile!.name}...</Text>
+          </Box>
+          <Text dimColor>Press q to disconnect</Text>
         </Box>
       )}
 
