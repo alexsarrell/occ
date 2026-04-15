@@ -9,6 +9,7 @@ import { resetDns } from '../core/dns.js';
 import { getProfile, getDefaultProfile } from '../config/store.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { LogsFooter } from '../components/LogsFooter.js';
+import { normalizeKey } from '../core/keyboard.js';
 import type { Profile } from '../config/types.js';
 import { execFileSync } from 'node:child_process';
 
@@ -242,10 +243,17 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     }
 
     // Main panel focused (no logs visible)
-    if (input === 'q' && (phase === 'connected' || phase === 'reconnecting')) {
+    // Esc — universal disconnect (layout-independent control char)
+    if (key.escape && (phase === 'connected' || phase === 'reconnecting')) {
+      managerRef.current?.disconnect();
+      return;
+    }
+    // q / r — normalized to handle non-Latin layouts
+    const ch = normalizeKey(input);
+    if (ch === 'q' && (phase === 'connected' || phase === 'reconnecting')) {
       managerRef.current?.disconnect();
     }
-    if (input === 'r' && phase === 'reconnecting' && reconnectHint) {
+    if (ch === 'r' && phase === 'reconnecting' && reconnectHint) {
       managerRef.current?.disconnect();
     }
   });
@@ -266,7 +274,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
   const renderHints = () => {
     if (!canShowLogs) return null;
     const parts: string[] = [];
-    if (phase === 'connected' || phase === 'reconnecting') parts.push('q disconnect');
+    if (phase === 'connected' || phase === 'reconnecting') parts.push('q/Esc disconnect');
     if (phase === 'reconnecting' && reconnectHint) parts.push('r force restart');
     if (!logsVisible) parts.push('Tab logs');
     if (parts.length === 0) return null;
