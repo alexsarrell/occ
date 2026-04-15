@@ -7,6 +7,7 @@ import { StopScreen } from './commands/stop.js';
 import { ProfilesScreen } from './commands/profiles.js';
 import { DoctorScreen } from './commands/doctor.js';
 import { CleanScreen } from './commands/clean.js';
+import { HotkeysScreen } from './commands/hotkeys.js';
 
 program
   .name('occ')
@@ -26,6 +27,7 @@ Examples:
   $ occ profiles list                  # list all profiles
   $ occ profiles default britain       # set default profile
   $ occ clean                          # reset DNS if network acts up
+  $ occ hotkeys install                # set up global ⌘⇧V/⌘⇧C/⌘⇧D shortcuts
 
 Configuration:
   Profiles are stored in ~/.occ/profiles.json (plain JSON, safe to edit by hand).
@@ -125,6 +127,40 @@ When to use:
 `)
   .action((opts: { full?: boolean }) => {
     render(<CleanScreen full={opts.full} />);
+  });
+
+program
+  .command('hotkeys')
+  .description('Manage global keyboard shortcuts for occ (via skhd)')
+  .argument('[action]', 'list | install | remove')
+  .addHelpText('after', `
+Examples:
+  $ occ hotkeys                # same as 'occ hotkeys list'
+  $ occ hotkeys install        # install default hotkeys (⌘⇧V/⌘⇧C/⌘⇧D)
+  $ occ hotkeys list           # show currently configured hotkeys
+  $ occ hotkeys remove         # remove occ-managed hotkeys (leaves skhd installed)
+
+What it does:
+  Uses skhd (https://github.com/koekeishiya/skhd) — a small open-source
+  hotkey daemon. 'install' will:
+    1. Check for skhd, offer to 'brew install' it if missing
+    2. Write a managed block to ~/.config/skhd/skhdrc (your other bindings
+       are NOT touched — we only manage between our BEGIN/END markers)
+    3. Open System Settings so you can grant skhd Accessibility permission
+       (required once, by macOS, for any global-hotkey tool)
+
+Default bindings:
+  ⌘⇧V   Open occ interactive menu in iTerm
+  ⌘⇧C   Connect to default VPN profile
+  ⌘⇧D   Disconnect VPN (shows macOS notification)
+
+Customization:
+  After install you can edit ~/.config/skhd/skhdrc by hand. Keep changes
+  OUTSIDE the '# BEGIN occ-managed' / '# END occ-managed' block if you
+  want them to survive 'occ hotkeys install' re-runs.
+`)
+  .action((action?: string) => {
+    render(<HotkeysScreen action={action} />);
   });
 
 // Default: interactive TUI
