@@ -13,11 +13,10 @@ import type { Profile } from '../config/types.js';
 import { execFileSync } from 'node:child_process';
 
 type Phase = 'resolving' | 'starting' | 'sudo' | 'authenticating' | 'otp' | 'connected' | 'reconnecting' | 'failed';
-type Focus = 'main' | 'logs';
 
 const CONNECTION_TIMEOUT_MS = 90_000;
 const STUCK_RECONNECT_SOFT_MS = 30_000; // SIGUSR2
-const STUCK_RECONNECT_HARD_MS = 90_000; // surface to user — can't auto-restart (would need OTP)
+const STUCK_RECONNECT_HARD_MS = 90_000; // surface to user
 
 export function ConnectScreen({ profileName }: { profileName?: string }) {
   const { exit } = useApp();
@@ -27,7 +26,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
   const [otpCode, setOtpCode] = useState('');
   const [profile, setProfile] = useState<Profile | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
-  const [focus, setFocus] = useState<Focus>('main');
+  const [logsVisible, setLogsVisible] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [logsScrollOffset, setLogsScrollOffset] = useState(0);
   const [reconnectHint, setReconnectHint] = useState(false);
@@ -62,7 +61,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     setPhase('starting');
   }, [profileName]);
 
-  // Start connection once profile is resolved (runs once when profile is set)
+  // Start connection once profile is resolved
   useEffect(() => {
     if (!profile) return;
 
@@ -185,15 +184,36 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     return () => clearInterval(interval);
   }, [phase]);
 
-  // Input handling — different behaviour depending on which panel has focus
+  // Hide logs whenever an interactive prompt is shown (sudo / otp)
+  useEffect(() => {
+    if (phase === 'sudo' || phase === 'otp') {
+      setLogsVisible(false);
+      setLogsExpanded(false);
+    }
+  }, [phase]);
+
+  const canShowLogs = phase !== 'resolving' && phase !== 'sudo' && phase !== 'otp';
+
   useInput((input, key) => {
-    // Tab / Shift+Tab cycles focus regardless of panel
-    if (key.tab) {
-      setFocus((f) => (f === 'main' ? 'logs' : 'main'));
+    // Tab toggles logs visibility (only useful in non-input phases)
+    if (key.tab && canShowLogs) {
+      if (logsVisible) {
+        setLogsVisible(false);
+        setLogsExpanded(false);
+        setLogsScrollOffset(0);
+      } else {
+        setLogsVisible(true);
+      }
       return;
     }
 
-    if (focus === 'logs') {
+    if (logsVisible) {
+      if (key.escape) {
+        setLogsVisible(false);
+        setLogsExpanded(false);
+        setLogsScrollOffset(0);
+        return;
+      }
       if (key.return) {
         setLogsExpanded((e) => !e);
         if (logsExpanded) setLogsScrollOffset(0);
@@ -217,15 +237,15 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
           return;
         }
       }
+      // Logs focused — swallow other keys
       return;
     }
 
-    // Main panel focused
+    // Main panel focused (no logs visible)
     if (input === 'q' && (phase === 'connected' || phase === 'reconnecting')) {
       managerRef.current?.disconnect();
     }
     if (input === 'r' && phase === 'reconnecting' && reconnectHint) {
-      // User explicitly requested hard restart (will need OTP again)
       managerRef.current?.disconnect();
     }
   });
@@ -243,101 +263,93 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     setPhase('authenticating');
   };
 
-  const showLogs = phase !== 'resolving' && phase !== 'failed';
+  const renderHints = () => {
+    if (!canShowLogs) return null;
+    const parts: string[] = [];
+    if (phase === 'connected' || phase === 'reconnecting') parts.push('q disconnect');
+    if (phase === 'reconnecting' && reconnectHint) parts.push('r force restart');
+    if (!logsVisible) parts.push('Tab logs');
+    if (parts.length === 0) return null;
+    return <Text dimColor>{parts.join(' · ')}</Text>;
+  };
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Box
-        flexDirection="column"
-        borderStyle={focus === 'main' && showLogs ? 'round' : undefined}
-        borderColor={focus === 'main' ? 'cyan' : undefined}
-        paddingX={focus === 'main' && showLogs ? 1 : 0}
-      >
-        {profile && (
-          <Box marginBottom={1}>
-            <Text bold>occ</Text>
-            <Text> ~ </Text>
-            <Text bold color="cyan">{profile.name}</Text>
-            <Text dimColor> ({profile.server})</Text>
+      {profile && (
+        <Box marginBottom={1}>
+          <Text bold>occ</Text>
+          <Text> ~ </Text>
+          <Text bold color="cyan">{profile.name}</Text>
+          <Text dimColor> ({profile.server})</Text>
+        </Box>
+      )}
+
+      {phase === 'resolving' && (
+        <Text><Spinner type="dots" /> Resolving profile...</Text>
+      )}
+
+      {phase === 'starting' && (
+        <Text><Spinner type="dots" /> Starting OpenConnect...</Text>
+      )}
+
+      {phase === 'sudo' && (
+        <Box flexDirection="column">
+          <Text>Enter sudo password:</Text>
+          <TextInput
+            value={sudoPassword}
+            onChange={setSudoPassword}
+            onSubmit={handleSudoSubmit}
+            mask="*"
+          />
+        </Box>
+      )}
+
+      {phase === 'authenticating' && (
+        <Text><Spinner type="dots" /> Authenticating...</Text>
+      )}
+
+      {phase === 'otp' && (
+        <Box flexDirection="column">
+          <Text>Enter OTP code:</Text>
+          <TextInput
+            value={otpCode}
+            onChange={setOtpCode}
+            onSubmit={handleOtpSubmit}
+          />
+        </Box>
+      )}
+
+      {phase === 'reconnecting' && (
+        <Box flexDirection="column">
+          <Box>
+            <StatusBadge status="connecting" />
+            <Text> Reconnecting to {profile!.name}...</Text>
           </Box>
-        )}
+          {reconnectHint && (
+            <Text color="yellow">Reconnect is taking a while. Press r to force restart (will require re-auth)</Text>
+          )}
+        </Box>
+      )}
 
-        {phase === 'resolving' && (
-          <Text><Spinner type="dots" /> Resolving profile...</Text>
-        )}
+      {phase === 'connected' && (
+        <Box>
+          <StatusBadge status="connected" />
+          <Text> {profile!.name}</Text>
+        </Box>
+      )}
 
-        {phase === 'starting' && (
-          <Text><Spinner type="dots" /> Starting OpenConnect...</Text>
-        )}
+      {phase === 'failed' && (
+        <Box>
+          <StatusBadge status="failed" />
+          <Text> {error}</Text>
+        </Box>
+      )}
 
-        {phase === 'sudo' && (
-          <Box flexDirection="column">
-            <Text>Enter sudo password:</Text>
-            <TextInput
-              value={sudoPassword}
-              onChange={setSudoPassword}
-              onSubmit={handleSudoSubmit}
-              mask="*"
-            />
-          </Box>
-        )}
+      {renderHints()}
 
-        {phase === 'authenticating' && (
-          <Text><Spinner type="dots" /> Authenticating...</Text>
-        )}
-
-        {phase === 'otp' && (
-          <Box flexDirection="column">
-            <Text>Enter OTP code:</Text>
-            <TextInput
-              value={otpCode}
-              onChange={setOtpCode}
-              onSubmit={handleOtpSubmit}
-            />
-          </Box>
-        )}
-
-        {phase === 'reconnecting' && (
-          <Box flexDirection="column">
-            <Box>
-              <StatusBadge status="connecting" />
-              <Text> Reconnecting to {profile!.name}...</Text>
-            </Box>
-            {reconnectHint ? (
-              <Box flexDirection="column">
-                <Text color="yellow">Reconnect is taking a while. Press r to force restart (will require re-auth)</Text>
-                <Text dimColor>or q to give up and disconnect</Text>
-              </Box>
-            ) : (
-              <Text dimColor>Press q to disconnect</Text>
-            )}
-          </Box>
-        )}
-
-        {phase === 'connected' && (
-          <Box flexDirection="column">
-            <Box>
-              <StatusBadge status="connected" />
-              <Text> {profile!.name}</Text>
-            </Box>
-            <Text dimColor>Press q to disconnect · Tab to focus logs</Text>
-          </Box>
-        )}
-
-        {phase === 'failed' && (
-          <Box flexDirection="column">
-            <Box>
-              <StatusBadge status="failed" />
-              <Text> {error}</Text>
-            </Box>
-          </Box>
-        )}
-      </Box>
-
-      {showLogs && (
+      {logsVisible && canShowLogs && (
         <LogsFooter
           logs={logs}
-          focused={focus === 'logs'}
           expanded={logsExpanded}
           scrollOffset={logsScrollOffset}
         />
