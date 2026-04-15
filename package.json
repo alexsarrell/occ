@@ -1,13 +1,24 @@
 {
-  "name": "occ-vpn",
+  "name": "@alexsarrell/occ",
   "version": "0.1.0",
-  "description": "OpenConnect VPN CLI with rich terminal UI",
+  "description": "OpenConnect VPN CLI for macOS with a rich terminal UI",
+  "author": "alexsarrell",
+  "license": "MIT",
+  "keywords": [
+    "vpn",
+    "openconnect",
+    "cli",
+    "macos",
+    "ink",
+    "anyconnect"
+  ],
   "type": "module",
   "bin": {
     "occ": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "engines": {
     "node": ">=18"

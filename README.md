@@ -1,11 +1,11 @@
-# occ-vpn
+# @alexsarrell/occ
 
 OpenConnect VPN CLI for macOS with a rich terminal UI.
 
 ## Install
 
 ```bash
-npm install -g occ-vpn
+npm install -g @alexsarrell/occ
 ```
 
 Requires [openconnect](https://www.infradead.org/openconnect/):
