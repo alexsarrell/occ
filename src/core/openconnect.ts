@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { type IPty } from 'node-pty';
 import { parseOpenConnectOutput, type ConnectionState } from './parser.js';
-import { getActiveInterface } from './dns.js';
+import { getPhysicalDefaultInterface } from './dns.js';
 import type { Profile } from '../config/types.js';
 
 interface OpenConnectManagerEvents {
@@ -165,7 +165,7 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   // ---------------- Monitoring (network change + wake-from-sleep) ---------
 
   private startMonitoring(): void {
-    this.lastInterface = getActiveInterface();
+    this.lastInterface = getPhysicalDefaultInterface();
     this.lastIp = this.lastInterface ? getInterfaceIp(this.lastInterface) : null;
     this.lastTick = Date.now();
 
@@ -185,7 +185,7 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   }
 
   private checkNetworkChange(): void {
-    const iface = getActiveInterface();
+    const iface = getPhysicalDefaultInterface();
     const ip = iface ? getInterfaceIp(iface) : null;
 
     const ifaceChanged = iface !== this.lastInterface;
