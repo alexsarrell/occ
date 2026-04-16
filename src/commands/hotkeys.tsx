@@ -188,9 +188,9 @@ function InstallFlow() {
           <Text color="green" bold>✓ Hotkeys installed.</Text>
           <Box marginTop={1} flexDirection="column">
             <Text>Default bindings:</Text>
-            <Text>  <Text color="cyan">⌘⇧V</Text>  — Open occ interactive menu</Text>
-            <Text>  <Text color="cyan">⌘⇧C</Text>  — Connect to default profile</Text>
-            <Text>  <Text color="cyan">⌘⇧D</Text>  — Disconnect VPN</Text>
+            <Text>  <Text color="cyan">⌃⌥⌘V</Text>  — Open occ interactive menu</Text>
+            <Text>  <Text color="cyan">⌃⌥⌘C</Text>  — Connect to default profile</Text>
+            <Text>  <Text color="cyan">⌃⌥⌘D</Text>  — Disconnect VPN</Text>
           </Box>
           <Box marginTop={1} flexDirection="column">
             <Text color="yellow" bold>One-time step required:</Text>

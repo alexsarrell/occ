@@ -180,19 +180,22 @@ export function removeManagedBlock(): boolean {
 export function buildDefaultHotkeys(occPath: string): Hotkey[] {
   const iterm = (cmd: string) =>
     `osascript -e 'tell application "iTerm" to create window with default profile command "${cmd}"'`;
+  // Use Cmd+Ctrl+Option+letter (⌃⌥⌘) — 4-key combos that don't collide with
+  // common app/system shortcuts (unlike Cmd+Shift+letter which conflicts
+  // with e.g. paste-as-plain-text).
   return [
     {
-      key: 'cmd + shift - v',
+      key: 'cmd + ctrl + alt - v',
       command: iterm(occPath),
       description: 'Open occ interactive menu',
     },
     {
-      key: 'cmd + shift - c',
+      key: 'cmd + ctrl + alt - c',
       command: iterm(`${occPath} connect`),
       description: 'Connect to default VPN profile',
     },
     {
-      key: 'cmd + shift - d',
+      key: 'cmd + ctrl + alt - d',
       command: `${occPath} stop > /dev/null 2>&1 && osascript -e 'display notification "VPN disconnected" with title "occ"'`,
       description: 'Disconnect VPN (with notification)',
     },

@@ -27,7 +27,7 @@ Examples:
   $ occ profiles list                  # list all profiles
   $ occ profiles default britain       # set default profile
   $ occ clean                          # reset DNS if network acts up
-  $ occ hotkeys install                # set up global ⌘⇧V/⌘⇧C/⌘⇧D shortcuts
+  $ occ hotkeys install                # set up global ⌃⌥⌘V/C/D shortcuts
 
 Configuration:
   Profiles are stored in ~/.occ/profiles.json (plain JSON, safe to edit by hand).
@@ -136,7 +136,7 @@ program
   .addHelpText('after', `
 Examples:
   $ occ hotkeys                # same as 'occ hotkeys list'
-  $ occ hotkeys install        # install default hotkeys (⌘⇧V/⌘⇧C/⌘⇧D)
+  $ occ hotkeys install        # install default hotkeys (⌃⌥⌘V/C/D)
   $ occ hotkeys list           # show currently configured hotkeys
   $ occ hotkeys remove         # remove occ-managed hotkeys (leaves skhd installed)
 
@@ -149,10 +149,10 @@ What it does:
     3. Open System Settings so you can grant skhd Accessibility permission
        (required once, by macOS, for any global-hotkey tool)
 
-Default bindings:
-  ⌘⇧V   Open occ interactive menu in iTerm
-  ⌘⇧C   Connect to default VPN profile
-  ⌘⇧D   Disconnect VPN (shows macOS notification)
+Default bindings (4-key combos to avoid conflicts with app/system shortcuts):
+  ⌃⌥⌘V   Open occ interactive menu in iTerm
+  ⌃⌥⌘C   Connect to default VPN profile
+  ⌃⌥⌘D   Disconnect VPN (shows macOS notification)
 
 Customization:
   After install you can edit ~/.config/skhd/skhdrc by hand. Keep changes
