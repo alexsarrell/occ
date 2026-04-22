@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { dirname } from 'node:path';
 import { getConfigDir } from './store.js';
+import { isTouchIdEnabled, hasTouchIdHardware } from '../core/touchid.js';
 
 export interface DoctorCheck {
   name: string;
@@ -56,10 +57,27 @@ export function checkConfigDir(): DoctorCheck {
   }
 }
 
+/** Informational — an 'ok' result here doesn't block anything; it's a hint. */
+export function checkTouchId(): DoctorCheck {
+  if (!hasTouchIdHardware()) {
+    return { name: 'touchid', status: 'ok', message: 'no Touch ID sensor (not applicable)' };
+  }
+  if (isTouchIdEnabled()) {
+    return { name: 'touchid', status: 'ok', message: 'enabled for sudo' };
+  }
+  return {
+    name: 'touchid',
+    status: 'ok',
+    message: 'sensor available but not enabled for sudo',
+    fix: 'occ touchid enable',
+  };
+}
+
 export async function runAllChecks(): Promise<DoctorCheck[]> {
   return [
     checkOpenConnect(),
     await checkNodePty(),
     checkConfigDir(),
+    checkTouchId(),
   ];
 }

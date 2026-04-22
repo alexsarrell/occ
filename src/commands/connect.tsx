@@ -10,6 +10,7 @@ import { getProfile, getDefaultProfile } from '../config/store.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { LogsFooter } from '../components/LogsFooter.js';
 import { normalizeKey } from '../core/keyboard.js';
+import { isTouchIdEnabled } from '../core/touchid.js';
 import type { Profile } from '../config/types.js';
 import { execFileSync } from 'node:child_process';
 
@@ -305,6 +306,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       {phase === 'sudo' && (
         <Box flexDirection="column">
           <Text>Enter sudo password:</Text>
+          {isTouchIdEnabled() && <Text dimColor>(or touch the sensor)</Text>}
           <TextInput
             value={sudoPassword}
             onChange={setSudoPassword}

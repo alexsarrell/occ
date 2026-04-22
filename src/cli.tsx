@@ -9,6 +9,7 @@ import { DoctorScreen } from './commands/doctor.js';
 import { CleanScreen } from './commands/clean.js';
 import { HotkeysScreen } from './commands/hotkeys.js';
 import { HealScreen } from './commands/heal.js';
+import { TouchIdScreen } from './commands/touchid.js';
 import { heal as runHeal } from './core/heal.js';
 
 // Auto-heal on every CLI startup (before commander parses). Silent if nothing
@@ -45,6 +46,7 @@ Examples:
   $ occ clean                          # reset DNS if network acts up
   $ occ hotkeys install                # set up global ⌃⌥⌘V/C/D shortcuts
   $ occ heal install                   # auto-fix zombie DNS on every login
+  $ occ touchid enable                 # use Touch ID instead of sudo password
 
 Configuration:
   Profiles are stored in ~/.occ/profiles.json (plain JSON, safe to edit by hand).
@@ -205,6 +207,28 @@ What it fixes:
 `)
   .action((action?: string, opts?: { silent?: boolean }) => {
     render(<HealScreen action={action} silent={opts?.silent} />);
+  });
+
+program
+  .command('touchid')
+  .description('Enable / disable Touch ID for sudo (sensor instead of password)')
+  .argument('[action]', 'status | enable | disable')
+  .addHelpText('after', `
+Examples:
+  $ occ touchid                # show status
+  $ occ touchid enable         # enable Touch ID for sudo (prompts for sudo once)
+  $ occ touchid disable        # back to password prompts
+
+How it works:
+  Adds 'auth sufficient pam_tid.so' to /etc/pam.d/sudo_local — the standard
+  macOS mechanism for biometric sudo. Once enabled, every sudo prompt
+  (including 'occ connect') offers Touch ID. You can still type the password
+  if the sensor is busy.
+
+  The config file survives macOS updates and is separate from /etc/pam.d/sudo.
+`)
+  .action((action?: string) => {
+    render(<TouchIdScreen action={action} />);
   });
 
 // Default: interactive TUI
