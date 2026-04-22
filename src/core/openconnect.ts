@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { type IPty } from 'node-pty';
 import { parseOpenConnectOutput, type ConnectionState } from './parser.js';
 import { getPhysicalDefaultInterface } from './dns.js';
+import { getBundledScriptPath } from './vpnc-script.js';
 import type { Profile } from '../config/types.js';
 
 interface OpenConnectManagerEvents {
@@ -39,10 +40,8 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   private lastInterface: string | null = null;
   private lastIp: string | null = null;
   private lastTick = Date.now();
-  private activeProfile: Profile | null = null;
 
   async connect(profile: Profile): Promise<void> {
-    this.activeProfile = profile;
     const pty = await import('node-pty');
 
     const args = [
@@ -54,6 +53,16 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
 
     if (profile.noDtls !== false) {
       args.push('--no-dtls');
+    }
+
+    // Use bundled split-DNS script unless profile opts out. The script uses
+    // scutil's Dynamic Store so DNS never gets stuck in persistent prefs
+    // after an ungraceful exit.
+    if (!profile.useDefaultScript) {
+      const scriptPath = getBundledScriptPath();
+      if (scriptPath) {
+        args.push(`--script=${scriptPath}`);
+      }
     }
 
     args.push(profile.server);
@@ -128,7 +137,6 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       }
       this.ptyProcess = null;
     }
-    this.activeProfile = null;
   }
 
   getState(): ConnectionState {

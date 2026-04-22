@@ -8,6 +8,22 @@ import { ProfilesScreen } from './commands/profiles.js';
 import { DoctorScreen } from './commands/doctor.js';
 import { CleanScreen } from './commands/clean.js';
 import { HotkeysScreen } from './commands/hotkeys.js';
+import { HealScreen } from './commands/heal.js';
+import { heal as runHeal } from './core/heal.js';
+
+// Auto-heal on every CLI startup (before commander parses). Silent if nothing
+// to do. Stateless safety net in case the split-DNS script didn't run (e.g.
+// legacy installs before 0.4, or someone using the default script via
+// useDefaultScript). Runs synchronously — milliseconds when there's nothing
+// to heal, fast enough to be invisible.
+try {
+  const r = runHeal();
+  if (r.healed && !process.argv.includes('--silent')) {
+    process.stderr.write(`[occ] auto-heal: ${r.reason}\n`);
+  }
+} catch {
+  // never let heal failure block a normal command
+}
 
 program
   .name('occ')
@@ -28,6 +44,7 @@ Examples:
   $ occ profiles default britain       # set default profile
   $ occ clean                          # reset DNS if network acts up
   $ occ hotkeys install                # set up global ⌃⌥⌘V/C/D shortcuts
+  $ occ heal install                   # auto-fix zombie DNS on every login
 
 Configuration:
   Profiles are stored in ~/.occ/profiles.json (plain JSON, safe to edit by hand).
@@ -161,6 +178,33 @@ Customization:
 `)
   .action((action?: string) => {
     render(<HotkeysScreen action={action} />);
+  });
+
+program
+  .command('heal')
+  .description('Check for and fix zombie DNS state from ungraceful VPN exits')
+  .argument('[action]', 'install | remove | status')
+  .option('--silent', 'No output unless healing is performed (for LaunchAgent use)')
+  .addHelpText('after', `
+Examples:
+  $ occ heal                   # one-shot check + fix if needed
+  $ occ heal install           # install LaunchAgent — runs heal on every login
+  $ occ heal remove            # uninstall the LaunchAgent
+  $ occ heal status            # show agent status + current system state
+  $ occ heal --silent          # quiet mode (used by the LaunchAgent)
+
+What it fixes:
+  If openconnect died ungracefully (kernel panic, battery loss, force-kill)
+  and left custom DNS servers set for your Wi-Fi/Ethernet, 'occ heal' resets
+  them back to DHCP defaults. It only acts when openconnect is NOT running
+  and the DNS differs from the DHCP default — otherwise it's a no-op.
+
+  With the bundled split-DNS script (default since 0.4), this should rarely
+  be needed since DNS changes live in scutil's dynamic store, not persistent
+  preferences. But 'occ heal install' is cheap insurance.
+`)
+  .action((action?: string, opts?: { silent?: boolean }) => {
+    render(<HealScreen action={action} silent={opts?.silent} />);
   });
 
 // Default: interactive TUI

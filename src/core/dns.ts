@@ -100,6 +100,24 @@ export function getPrimaryPhysicalService(): string | null {
   return getServiceName(physical);
 }
 
+/**
+ * Reads the DNS servers currently configured for a service via networksetup.
+ * Returns an empty array when DNS is on "Automatic" (DHCP-provided).
+ */
+export function getDnsServers(service: string): string[] {
+  try {
+    const output = execFileSync('networksetup', ['-getdnsservers', service], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    // networksetup prints "There aren't any DNS Servers set on <service>." when empty.
+    if (/there aren't any dns servers/i.test(output)) return [];
+    return output.split('\n').map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export function resetDns(): boolean {
   const service = getPrimaryPhysicalService();
   if (!service) return false;

@@ -81,6 +81,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     };
     process.on('SIGINT', handleSignal);
     process.on('SIGTERM', handleSignal);
+    process.on('SIGHUP', handleSignal);
 
     const timeout = setTimeout(() => {
       if (phaseRef.current !== 'connected') {
@@ -164,6 +165,7 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       clearTimeout(timeout);
       process.off('SIGINT', handleSignal);
       process.off('SIGTERM', handleSignal);
+      process.off('SIGHUP', handleSignal);
       cleanup();
     };
   }, [profile]);

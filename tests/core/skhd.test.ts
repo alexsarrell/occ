@@ -108,7 +108,9 @@ describe('buildDefaultHotkeys', () => {
   it('includes three default bindings with the occ path baked in', () => {
     const hotkeys = buildDefaultHotkeys('/opt/homebrew/bin/occ');
     expect(hotkeys).toHaveLength(3);
-    expect(hotkeys[0].key).toBe('cmd + shift - v');
+    expect(hotkeys[0].key).toBe('cmd + ctrl + alt - v');
+    expect(hotkeys[1].key).toBe('cmd + ctrl + alt - c');
+    expect(hotkeys[2].key).toBe('cmd + ctrl + alt - d');
     expect(hotkeys[0].command).toContain('/opt/homebrew/bin/occ');
     expect(hotkeys[1].command).toContain('/opt/homebrew/bin/occ connect');
     expect(hotkeys[2].command).toContain('/opt/homebrew/bin/occ stop');

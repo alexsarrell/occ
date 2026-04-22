@@ -1,0 +1,188 @@
+#!/bin/sh
+# occ-vpnc-script — macOS vpnc-script replacement.
+#
+# Design goal: NEVER modify persistent DNS preferences. All DNS state
+# lives in scutil's Dynamic Store, which is volatile — cleared by reboot
+# and network state changes. When openconnect exits ungracefully, the
+# worst case is a stale entry in State:/Network/Service/... but the
+# user's Wi-Fi/Ethernet DHCP DNS is untouched, so internet keeps working.
+#
+# Compared to the default vpnc-script (which uses `networksetup
+# -setdnsservers`), this avoids the "DNS broken until manual reset"
+# failure mode after force-shutdown / battery loss / kernel panic.
+#
+# Called by openconnect via --script=<path-to-this>. Environment
+# variables supplied by openconnect; `reason` tells us the phase.
+
+set -e
+
+# Unique service identifier so our entries are isolated from any other
+# VPN clients. Using TUNDEV for stability across reconnects.
+if [ -n "${TUNDEV:-}" ]; then
+    SERVICE_ID="occ-${TUNDEV}"
+else
+    SERVICE_ID="occ-$$"
+fi
+
+DNS_KEY="State:/Network/Service/${SERVICE_ID}/DNS"
+STATE_DIR="${HOME}/.occ"
+STATE_FILE="${STATE_DIR}/last-script-state"
+
+log() {
+    # Log to a file we can inspect; tee would interfere with openconnect's output capture.
+    mkdir -p "${STATE_DIR}" 2>/dev/null || true
+    echo "[$(date -u +%FT%TZ)] [${reason:-?}] $*" >> "${STATE_DIR}/vpnc-script.log" 2>/dev/null || true
+}
+
+save_state() {
+    # Remember values we need on disconnect that aren't re-supplied.
+    mkdir -p "${STATE_DIR}" 2>/dev/null || true
+    {
+        echo "TUNDEV=${TUNDEV}"
+        echo "VPNGATEWAY=${VPNGATEWAY}"
+        echo "ORIG_DEFAULT_GW=${ORIG_DEFAULT_GW:-}"
+        echo "ORIG_DEFAULT_IF=${ORIG_DEFAULT_IF:-}"
+        echo "FULL_TUNNEL=${FULL_TUNNEL:-0}"
+    } > "${STATE_FILE}"
+}
+
+load_state() {
+    if [ -f "${STATE_FILE}" ]; then
+        # shellcheck disable=SC1090
+        . "${STATE_FILE}"
+    fi
+}
+
+# ---------- connect / reconnect ----------
+
+do_connect() {
+    log "connecting TUNDEV=${TUNDEV} IP=${INTERNAL_IP4_ADDRESS} DNS='${INTERNAL_IP4_DNS}' SPLIT_DNS='${CISCO_SPLIT_DNS}' SPLIT_INC=${CISCO_SPLIT_INC:-0}"
+
+    # 1. Remember the physical default gateway *before* we change routes,
+    #    so we can add a pinned route to the VPN gateway (avoid loops).
+    ORIG_DEFAULT_GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}' | head -1)
+    ORIG_DEFAULT_IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}' | head -1)
+
+    # 2. Bring up the tunnel interface.
+    MTU="${INTERNAL_IP4_MTU:-1412}"
+    ifconfig "${TUNDEV}" inet "${INTERNAL_IP4_ADDRESS}" "${INTERNAL_IP4_ADDRESS}" mtu "${MTU}" up
+
+    # 3. Routes. Pin VPN gateway via physical so tunnel packets don't try
+    #    to go through themselves.
+    if [ -n "${ORIG_DEFAULT_GW}" ] && [ -n "${VPNGATEWAY}" ]; then
+        route add -host "${VPNGATEWAY}" "${ORIG_DEFAULT_GW}" 2>/dev/null || true
+    fi
+
+    FULL_TUNNEL=0
+    if [ -n "${CISCO_SPLIT_INC:-}" ] && [ "${CISCO_SPLIT_INC}" -gt 0 ] 2>/dev/null; then
+        # Split-include: add route per advertised range.
+        i=0
+        while [ "$i" -lt "${CISCO_SPLIT_INC}" ]; do
+            eval "ADDR=\${CISCO_SPLIT_INC_${i}_ADDR:-}"
+            eval "MASK=\${CISCO_SPLIT_INC_${i}_MASK:-}"
+            if [ -n "${ADDR}" ] && [ -n "${MASK}" ]; then
+                route add -net "${ADDR}" -netmask "${MASK}" -interface "${TUNDEV}" 2>/dev/null || true
+            fi
+            i=$((i + 1))
+        done
+    else
+        # Full tunnel: default route via tunnel.
+        FULL_TUNNEL=1
+        route add default -interface "${TUNDEV}" 2>/dev/null || true
+    fi
+
+    # 4. DNS via scutil (Dynamic Store). This is the whole point of the script:
+    #    we never touch Setup:/... (persistent prefs).
+    if [ -n "${INTERNAL_IP4_DNS:-}" ]; then
+        # Build space-separated match domain list.
+        MATCH_DOMAINS=""
+        if [ -n "${CISCO_SPLIT_DNS:-}" ]; then
+            MATCH_DOMAINS=$(echo "${CISCO_SPLIT_DNS}" | tr ',' ' ')
+        fi
+        if [ -n "${CISCO_DEF_DOMAIN:-}" ]; then
+            MATCH_DOMAINS="${MATCH_DOMAINS} ${CISCO_DEF_DOMAIN}"
+        fi
+
+        if [ -n "${MATCH_DOMAINS}" ]; then
+            # Split-DNS: supplemental resolver only for VPN domains. Wi-Fi DNS unchanged.
+            scutil <<EOF
+d.init
+d.add ServerAddresses * ${INTERNAL_IP4_DNS}
+d.add SupplementalMatchDomains * ${MATCH_DOMAINS}
+d.add SupplementalMatchDomainsNoSearch * 0
+set ${DNS_KEY}
+quit
+EOF
+        else
+            # No match domains from server: act as primary resolver, but still
+            # via Dynamic Store — reboot or network change wipes us.
+            scutil <<EOF
+d.init
+d.add ServerAddresses * ${INTERNAL_IP4_DNS}
+d.add PrimaryRank * first
+set ${DNS_KEY}
+quit
+EOF
+        fi
+
+        # Kick mDNSResponder so it picks up the new config immediately.
+        killall -HUP mDNSResponder 2>/dev/null || true
+    fi
+
+    save_state
+    log "connected, DNS_KEY=${DNS_KEY}"
+}
+
+# ---------- disconnect ----------
+
+do_disconnect() {
+    load_state
+    log "disconnecting"
+
+    # Remove our DNS entry. Routes bound to the tunnel are auto-removed when the
+    # tunnel goes down, but the pinned VPN gateway route must be explicitly deleted.
+    scutil <<EOF 2>/dev/null || true
+remove ${DNS_KEY}
+quit
+EOF
+
+    if [ -n "${VPNGATEWAY:-}" ]; then
+        route delete -host "${VPNGATEWAY}" 2>/dev/null || true
+    fi
+
+    if [ -n "${TUNDEV:-}" ]; then
+        ifconfig "${TUNDEV}" down 2>/dev/null || true
+    fi
+
+    killall -HUP mDNSResponder 2>/dev/null || true
+    rm -f "${STATE_FILE}" 2>/dev/null || true
+    log "disconnected cleanly"
+}
+
+# ---------- main ----------
+
+case "${reason:-}" in
+    pre-init)
+        : # nothing to do
+        ;;
+    connect)
+        do_connect
+        ;;
+    disconnect)
+        do_disconnect
+        ;;
+    reconnect)
+        # openconnect re-established the TCP/DTLS session. Routes/interfaces
+        # are in the same state, but let's reassert DNS in case Dynamic Store
+        # was cleared by a network event.
+        do_connect
+        ;;
+    attempt-reconnect)
+        : # best-effort, nothing to do
+        ;;
+    *)
+        log "unknown reason: ${reason:-}"
+        ;;
+esac
+
+exit 0
