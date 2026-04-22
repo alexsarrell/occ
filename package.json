@@ -1,6 +1,6 @@
 {
   "name": "@alexsarrell/occ",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "OpenConnect VPN CLI for macOS with a rich terminal UI",
   "author": "alexsarrell",
   "license": "MIT",
