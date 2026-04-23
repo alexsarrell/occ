@@ -1,6 +1,19 @@
 import React from 'react';
 import { render } from 'ink';
 import { program } from 'commander';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+
+/** Read version from the shipped package.json so it always matches the release. */
+function readVersion(): string {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    return JSON.parse(readFileSync(pkgPath, 'utf-8')).version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
 import { App } from './app.js';
 import { ConnectScreen } from './commands/connect.js';
 import { StopScreen } from './commands/stop.js';
@@ -29,7 +42,7 @@ try {
 program
   .name('occ')
   .description('OpenConnect VPN CLI for macOS with a rich terminal UI')
-  .version('0.1.0')
+  .version(readVersion())
   .addHelpText('after', `
 Quick start:
   $ brew install openconnect           # install openconnect
