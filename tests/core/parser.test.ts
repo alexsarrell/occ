@@ -2,8 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { parseOpenConnectOutput } from '../../src/core/parser.js';
 
 describe('parseOpenConnectOutput', () => {
-  it('detects sudo password prompt', () => {
-    expect(parseOpenConnectOutput('Password: ')).toEqual({ state: 'waiting-sudo' });
+  // Parser only sees openconnect output (sudo auth runs in a separate pty),
+  // so any "Password:" here is always a VPN password prompt.
+
+  it('detects VPN password prompt (capital P)', () => {
+    expect(parseOpenConnectOutput('Password: ')).toEqual({ state: 'authenticating' });
   });
 
   it('detects VPN password prompt (lowercase)', () => {
@@ -74,8 +77,4 @@ describe('parseOpenConnectOutput', () => {
     expect(parseOpenConnectOutput('')).toBeNull();
   });
 
-  it('distinguishes sudo Password: from VPN password:', () => {
-    expect(parseOpenConnectOutput('Password: ')?.state).toBe('waiting-sudo');
-    expect(parseOpenConnectOutput('VPN password: ')?.state).toBe('authenticating');
-  });
 });

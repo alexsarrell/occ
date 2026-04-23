@@ -10,6 +10,9 @@ import {
   writeSudoLocal,
   hasTouchIdHardware,
   sudoLocalPath,
+  findPamReattachPath,
+  isPamReattachInstalled,
+  installPamReattachViaBrew,
 } from '../core/touchid.js';
 
 interface Props {
@@ -36,6 +39,7 @@ function StatusFlow() {
 
   const enabled = isTouchIdEnabled();
   const hasHw = hasTouchIdHardware();
+  const reattachPath = findPamReattachPath();
 
   return (
     <Box flexDirection="column" padding={1}>
@@ -49,6 +53,10 @@ function StatusFlow() {
         Touch ID for sudo:{' '}
         {enabled ? <Text color="green">enabled</Text> : <Text dimColor>disabled</Text>}
       </Text>
+      <Text>
+        pam_reattach:{' '}
+        {reattachPath ? <Text color="green">installed ({reattachPath})</Text> : <Text color="yellow">not installed — required for pty sessions</Text>}
+      </Text>
       <Text dimColor>Config: {sudoLocalPath()}</Text>
       {!enabled && (
         <Box marginTop={1}>
@@ -59,7 +67,7 @@ function StatusFlow() {
   );
 }
 
-type Phase = 'confirm' | 'writing' | 'done' | 'already' | 'error';
+type Phase = 'confirm' | 'offer-reattach' | 'installing-reattach' | 'writing' | 'done' | 'already' | 'error';
 
 function EnableFlow() {
   const { exit } = useApp();
@@ -87,9 +95,9 @@ function EnableFlow() {
     );
   }
 
-  const performEnable = () => {
+  const writeConfig = (reattachPath: string | null) => {
     const existing = readSudoLocal();
-    const { changed, next } = computeEnabledContent(existing);
+    const { changed, next } = computeEnabledContent(existing, reattachPath);
     if (!changed) {
       setPhase('already');
       setTimeout(() => exit(), 150);
@@ -102,11 +110,38 @@ function EnableFlow() {
       try {
         writeSudoLocal(next);
         console.log('\x1b[32m✓ Touch ID for sudo enabled.\x1b[0m');
-        console.log('Touch your sensor the next time sudo asks for a password.');
+        if (reattachPath) {
+          console.log(`  with pam_reattach: ${reattachPath}`);
+        }
+        console.log('Touch the sensor next time sudo asks for a password.');
       } catch (e: any) {
         console.error(`\x1b[31m✗ Failed to write ${sudoLocalPath()}: ${e.message ?? e}\x1b[0m`);
         process.exit(1);
       }
+    }, 50);
+  };
+
+  /** If Touch ID needs pam_reattach for pty sessions and it isn't installed,
+   *  offer to brew install it. Otherwise proceed to writing sudo_local. */
+  const performEnable = () => {
+    const reattachPath = findPamReattachPath();
+    if (reattachPath) {
+      writeConfig(reattachPath);
+      return;
+    }
+    setPhase('offer-reattach');
+  };
+
+  const installReattachThenWrite = () => {
+    setPhase('installing-reattach');
+    setTimeout(() => {
+      try {
+        installPamReattachViaBrew();
+      } catch {
+        // continue without — writeConfig will just skip reattach line.
+      }
+      const nowInstalled = isPamReattachInstalled() ? findPamReattachPath() : null;
+      writeConfig(nowInstalled);
     }, 50);
   };
 
@@ -132,6 +167,44 @@ function EnableFlow() {
         </Box>
       </Box>
     );
+  }
+
+  if (phase === 'offer-reattach') {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Box marginBottom={1}>
+          <Text bold>pam_reattach required</Text>
+        </Box>
+        <Text>
+          <Text color="cyan">pam_tid.so</Text> alone doesn't work in non-login terminals
+          (iTerm / tmux / subprocess ptys) — Touch ID overlay appears, but sudo doesn't
+          accept the auth due to a macOS session context mismatch.
+        </Text>
+        <Text>
+          <Text color="cyan">pam_reattach</Text> (open source, ~70 LOC, auditable at
+          https://github.com/fabianishere/pam_reattach) fixes this.
+        </Text>
+        <Text dimColor>Will run: brew install pam-reattach</Text>
+        <Box marginTop={1}>
+          <SelectInput
+            items={[
+              { label: 'Install pam-reattach via brew', value: 'install' },
+              { label: 'Skip (Touch ID may not work in pty)', value: 'skip' },
+              { label: 'Cancel', value: 'cancel' },
+            ]}
+            onSelect={(i) => {
+              if (i.value === 'cancel') exit();
+              else if (i.value === 'skip') writeConfig(null);
+              else installReattachThenWrite();
+            }}
+          />
+        </Box>
+      </Box>
+    );
+  }
+
+  if (phase === 'installing-reattach') {
+    return <Text><Spinner type="dots" /> Installing pam-reattach via brew...</Text>;
   }
 
   if (phase === 'writing') {

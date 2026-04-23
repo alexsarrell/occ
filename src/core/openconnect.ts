@@ -18,7 +18,6 @@ const NET_POLL_MS = 5_000;
 const WAKE_TICK_MS = 1_000;
 const WAKE_LAG_THRESHOLD_MS = 10_000;
 
-/** Gets the primary IPv4 of an interface. Returns null on failure. */
 function getInterfaceIp(iface: string): string | null {
   try {
     return execFileSync('ipconfig', ['getifaddr', iface], {
@@ -30,8 +29,28 @@ function getInterfaceIp(iface: string): string | null {
   }
 }
 
+/**
+ * Connection lifecycle:
+ *
+ *   1. ensureSudo() — checks `sudo -n true` first. If not cached, spawns
+ *      `sudo -v` in a dedicated pty. That pty ONLY sees sudo output, so
+ *      "Password:" there is UNAMBIGUOUSLY the sudo password prompt. User
+ *      input goes through submitSudoPassword(). Touch ID (with pam_reattach)
+ *      authenticates out-of-band and sudo -v exits successfully.
+ *
+ *   2. After sudo is cached, spawns `sudo -n openconnect ...` in a separate
+ *      pty. This pty NEVER sees sudo prompts (non-interactive), so every
+ *      "Password:" there is unambiguously a VPN password prompt. No
+ *      sudoDoneRef flags, no counters, no heuristics.
+ *
+ * Event semantics:
+ *   - state 'waiting-sudo' means authPty is waiting on sudo password
+ *   - states 'authenticating' / 'waiting-otp' / 'connected' come from the
+ *     openconnect pty exclusively
+ */
 export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
-  private ptyProcess: IPty | null = null;
+  private authPty: IPty | null = null;
+  private ocPty: IPty | null = null;
   private currentState: ConnectionState = 'idle';
   private logBuffer: string[] = [];
   private partialLine = '';
@@ -42,10 +61,71 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   private lastTick = Date.now();
 
   async connect(profile: Profile): Promise<void> {
+    this.setState('idle');
+
+    const sudoOk = await this.ensureSudo();
+    if (!sudoOk) {
+      this.setState('failed', 'Sudo authentication failed');
+      return;
+    }
+
+    await this.spawnOpenconnect(profile);
+    this.startMonitoring();
+  }
+
+  // ---------------- Sudo authentication ----------------
+
+  private isSudoCached(): boolean {
+    try {
+      execFileSync('sudo', ['-n', 'true'], { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async ensureSudo(): Promise<boolean> {
+    if (this.isSudoCached()) {
+      this.pushLogLine('[occ] sudo creds already cached — skipping auth');
+      return true;
+    }
+    return this.authenticateSudo();
+  }
+
+  private async authenticateSudo(): Promise<boolean> {
+    const pty = await import('node-pty');
+    return new Promise((resolve) => {
+      this.setState('waiting-sudo');
+      this.authPty = pty.spawn('sudo', ['-v'], {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 30,
+      });
+
+      this.authPty.onData((data: string) => {
+        this.emit('output', data);
+        this.appendToLogs(data);
+      });
+
+      this.authPty.onExit(({ exitCode }: { exitCode: number }) => {
+        this.authPty = null;
+        resolve(exitCode === 0);
+      });
+    });
+  }
+
+  /** Send the sudo password typed by the user into the auth pty. */
+  submitSudoPassword(password: string): void {
+    this.authPty?.write(password + '\r');
+  }
+
+  // ---------------- OpenConnect ----------------
+
+  private async spawnOpenconnect(profile: Profile): Promise<void> {
     const pty = await import('node-pty');
 
     const args = [
-      '-p', 'Password: ',
+      '-n', // non-interactive — sudo creds already cached, never prompts
       'openconnect',
       `--user=${profile.username}`,
       `--reconnect-timeout=${profile.reconnectTimeout ?? 300}`,
@@ -55,9 +135,6 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       args.push('--no-dtls');
     }
 
-    // Use bundled split-DNS script unless profile opts out. The script uses
-    // scutil's Dynamic Store so DNS never gets stuck in persistent prefs
-    // after an ungraceful exit.
     if (!profile.useDefaultScript) {
       const scriptPath = getBundledScriptPath();
       if (scriptPath) {
@@ -67,15 +144,13 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
 
     args.push(profile.server);
 
-    this.ptyProcess = pty.spawn('sudo', args, {
+    this.ocPty = pty.spawn('sudo', args, {
       name: 'xterm-256color',
       cols: 80,
       rows: 30,
     });
 
-    this.setState('idle');
-
-    this.ptyProcess.onData((data: string) => {
+    this.ocPty.onData((data: string) => {
       this.emit('output', data);
       this.appendToLogs(data);
       const result = parseOpenConnectOutput(data);
@@ -84,37 +159,28 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       }
     });
 
-    this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
+    this.ocPty.onExit(({ exitCode }: { exitCode: number }) => {
       this.setState('disconnected');
       this.emit('exit', exitCode);
       this.stopMonitoring();
     });
-
-    this.startMonitoring();
   }
 
+  /** Send input (VPN password, OTP) into the openconnect pty. */
   sendInput(text: string): void {
-    this.ptyProcess?.write(text + '\r');
+    this.ocPty?.write(text + '\r');
   }
 
-  /**
-   * Request a soft reconnect via SIGUSR2. openconnect will re-establish
-   * the tunnel using the existing session (no re-auth/OTP needed).
-   *
-   * sudo forwards SIGUSR2 to its child per its docs, and we can signal
-   * sudo because our real UID still matches sudo's real UID even though
-   * sudo's effective UID is 0.
-   *
-   * Returns true on apparent success, false if no process to signal.
-   */
+  // ---------------- Reconnect / disconnect ----------------
+
+  /** SIGUSR2 → openconnect re-establishes with existing session (no re-auth). */
   reconnect(): boolean {
-    if (!this.ptyProcess) return false;
+    if (!this.ocPty) return false;
     try {
-      process.kill(this.ptyProcess.pid!, 'SIGUSR2');
+      process.kill(this.ocPty.pid!, 'SIGUSR2');
       this.pushLogLine('[occ] SIGUSR2 sent — requesting reconnect (no re-auth)');
       return true;
     } catch (e) {
-      // Fallback: try pkill via sudo -n (uses cached sudo creds).
       try {
         execFileSync('sudo', ['-n', 'pkill', '-USR2', 'openconnect'], { stdio: 'pipe' });
         this.pushLogLine('[occ] sudo -n pkill -USR2 sent — requesting reconnect');
@@ -126,18 +192,19 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     }
   }
 
-  /** Hard reset — kills openconnect. Caller must re-authenticate. */
   disconnect(): void {
     this.stopMonitoring();
-    if (this.ptyProcess) {
-      try {
-        this.ptyProcess.kill('SIGTERM');
-      } catch {
-        // Process may already be dead
-      }
-      this.ptyProcess = null;
+    if (this.authPty) {
+      try { this.authPty.kill('SIGTERM'); } catch { /* may be dead */ }
+      this.authPty = null;
+    }
+    if (this.ocPty) {
+      try { this.ocPty.kill('SIGTERM'); } catch { /* may be dead */ }
+      this.ocPty = null;
     }
   }
+
+  // ---------------- State + logs ----------------
 
   getState(): ConnectionState {
     return this.currentState;
@@ -153,7 +220,6 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   }
 
   private appendToLogs(data: string): void {
-    // node-pty emits arbitrary chunks — split by newlines ourselves.
     const combined = this.partialLine + data.replace(/\r\n?/g, '\n');
     const parts = combined.split('\n');
     this.partialLine = parts.pop() ?? '';
@@ -170,7 +236,7 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     this.emit('log', line);
   }
 
-  // ---------------- Monitoring (network change + wake-from-sleep) ---------
+  // ---------------- Monitoring (network change + wake-from-sleep) ----------------
 
   private startMonitoring(): void {
     this.lastInterface = getPhysicalDefaultInterface();

@@ -14,10 +14,9 @@ export interface ParseResult {
 }
 
 export function parseOpenConnectOutput(data: string): ParseResult | null {
-  // Sudo prompt: "Password:" at the very start of the line, capital P
-  if (/^Password:\s*$/m.test(data)) {
-    return { state: 'waiting-sudo' };
-  }
+  // NOTE: sudo runs in a separate pty (see OpenConnectManager), so this
+  // parser only ever sees openconnect output. Any "Password:" here is
+  // unambiguously a VPN password prompt — no sudo disambiguation needed.
 
   // Tunnel creation error — check before generic "failed" to avoid false positives
   if (/(?:failed to connect utun|failed to open tun|set up tun device failed|operation not permitted)/i.test(data)) {
@@ -29,7 +28,7 @@ export function parseOpenConnectOutput(data: string): ParseResult | null {
     return { state: 'failed', message: 'Authentication failed' };
   }
 
-  // VPN password/passcode prompt (case-insensitive, may have prefix text)
+  // VPN password/passcode prompt (any capitalization, end of line)
   if (/(?:password|passcode):\s*$/im.test(data)) {
     return { state: 'authenticating' };
   }
