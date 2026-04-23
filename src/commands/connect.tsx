@@ -149,6 +149,26 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       }
     });
 
+    // Touch ID / cached-sudo heuristic: while we're in 'sudo' phase, any
+    // non-Password: output from openconnect means sudo already passed
+    // (pam_tid accepted a fingerprint, or sudo had cached creds, etc).
+    // Without this, the next VPN 'Password:' prompt would be routed to
+    // the sudo input in the UI and openconnect would hang waiting for
+    // its VPN password.
+    manager.on('output', (data: string) => {
+      if (phaseRef.current !== 'sudo') return;
+      if (sudoDoneRef.current) return;
+      // Strip "Password:" prompt echoes and whitespace; anything left
+      // means new, substantive output from openconnect.
+      const remainder = data
+        .replace(/Password:\s*/g, '')
+        .replace(/[\r\n\s]+/g, '');
+      if (remainder.length > 0) {
+        sudoDoneRef.current = true;
+        setPhase('authenticating');
+      }
+    });
+
     // Live log updates — throttle to max 5 updates/sec for smooth rendering
     let pending = false;
     manager.on('log', () => {

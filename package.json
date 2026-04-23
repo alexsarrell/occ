@@ -36,6 +36,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@alexsarrell/occ": "^0.5.1",
     "commander": "^13.0.0",
     "ink": "^5.1.0",
     "ink-select-input": "^6.0.0",
