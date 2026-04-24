@@ -259,10 +259,10 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
   });
 
   const handleSudoSubmit = (value: string) => {
-    managerRef.current?.submitSudoPassword(value);
+    managerRef.current?.sendInput(value);
     setSudoPassword('');
-    // Visual transition — the manager will emit 'authenticating' once openconnect
-    // starts prompting, but a spinner during sudo-verify feels more responsive.
+    // Transition to a spinner while sudo verifies. Manager will emit
+    // 'authenticating' once openconnect begins prompting for the VPN password.
     setPhase('authenticating');
   };
 

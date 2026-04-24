@@ -18,6 +18,10 @@ const NET_POLL_MS = 5_000;
 const WAKE_TICK_MS = 1_000;
 const WAKE_LAG_THRESHOLD_MS = 10_000;
 
+/** Markers printed by our shell wrapper so the parser can tell when
+ *  sudo-auth ends and openconnect begins. */
+const SUDO_OK_MARKER = '__OCC_SUDO_OK__';
+
 function getInterfaceIp(iface: string): string | null {
   try {
     return execFileSync('ipconfig', ['getifaddr', iface], {
@@ -32,26 +36,30 @@ function getInterfaceIp(iface: string): string | null {
 /**
  * Connection lifecycle:
  *
- *   1. ensureSudo() — checks `sudo -n true` first. If not cached, spawns
- *      `sudo -v` in a dedicated pty. That pty ONLY sees sudo output, so
- *      "Password:" there is UNAMBIGUOUSLY the sudo password prompt. User
- *      input goes through submitSudoPassword(). Touch ID (with pam_reattach)
- *      authenticates out-of-band and sudo -v exits successfully.
+ * We spawn a single pty running:
  *
- *   2. After sudo is cached, spawns `sudo -n openconnect ...` in a separate
- *      pty. This pty NEVER sees sudo prompts (non-interactive), so every
- *      "Password:" there is unambiguously a VPN password prompt. No
- *      sudoDoneRef flags, no counters, no heuristics.
+ *   sudo -v && echo __OCC_SUDO_OK__ && exec sudo -n openconnect ARGS
  *
- * Event semantics:
- *   - state 'waiting-sudo' means authPty is waiting on sudo password
- *   - states 'authenticating' / 'waiting-otp' / 'connected' come from the
- *     openconnect pty exclusively
+ *   - `sudo -v` authenticates (types password, Touch ID via pam_tid, etc).
+ *     Output goes through the pty; any "Password:" here is unambiguously
+ *     the sudo password prompt.
+ *   - After auth succeeds, `__OCC_SUDO_OK__` is printed. The parser flips
+ *     into "openconnect mode" — from here any "Password:" is a VPN prompt.
+ *   - `exec sudo -n` replaces the shell with openconnect. `-n` guarantees
+ *     sudo never prompts again (uses the cache just populated by `sudo -v`).
+ *     Using the same pty keeps the tty-scoped sudo credential cache in the
+ *     same scope — a separate pty would get tty_tickets isolation and
+ *     `sudo -n` would fail.
+ *   - If auth fails (3 wrong passwords), the && chain short-circuits, the
+ *     shell exits non-zero, onExit fires before we ever reach 'connected'
+ *     → we surface 'failed' with a sudo auth message.
+ *
+ * No heuristics, no counters, no output-sniffing guesswork.
  */
 export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
-  private authPty: IPty | null = null;
-  private ocPty: IPty | null = null;
+  private ptyProcess: IPty | null = null;
   private currentState: ConnectionState = 'idle';
+  private sudoPassed = false;
   private logBuffer: string[] = [];
   private partialLine = '';
   private netPollTimer: NodeJS.Timeout | null = null;
@@ -61,123 +69,89 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   private lastTick = Date.now();
 
   async connect(profile: Profile): Promise<void> {
+    const pty = await import('node-pty');
+    this.sudoPassed = false;
     this.setState('idle');
 
-    const sudoOk = await this.ensureSudo();
-    if (!sudoOk) {
-      this.setState('failed', 'Sudo authentication failed');
-      return;
-    }
+    const ocArgs = buildOpenconnectArgs(profile);
 
-    await this.spawnOpenconnect(profile);
-    this.startMonitoring();
-  }
+    // Script passed via -c. Openconnect args go after -- as $1, $2, ...
+    // `exec` replaces sh with sudo so pty.pid ends up pointing at the VPN
+    // process, which matters for SIGUSR2-based reconnect later.
+    const script = `sudo -v && echo "${SUDO_OK_MARKER}" && exec sudo -n openconnect "$@"`;
 
-  // ---------------- Sudo authentication ----------------
-
-  private isSudoCached(): boolean {
-    try {
-      execFileSync('sudo', ['-n', 'true'], { stdio: 'pipe' });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async ensureSudo(): Promise<boolean> {
-    if (this.isSudoCached()) {
-      this.pushLogLine('[occ] sudo creds already cached — skipping auth');
-      return true;
-    }
-    return this.authenticateSudo();
-  }
-
-  private async authenticateSudo(): Promise<boolean> {
-    const pty = await import('node-pty');
-    return new Promise((resolve) => {
-      this.setState('waiting-sudo');
-      this.authPty = pty.spawn('sudo', ['-v'], {
-        name: 'xterm-256color',
-        cols: 80,
-        rows: 30,
-      });
-
-      this.authPty.onData((data: string) => {
-        this.emit('output', data);
-        this.appendToLogs(data);
-      });
-
-      this.authPty.onExit(({ exitCode }: { exitCode: number }) => {
-        this.authPty = null;
-        resolve(exitCode === 0);
-      });
-    });
-  }
-
-  /** Send the sudo password typed by the user into the auth pty. */
-  submitSudoPassword(password: string): void {
-    this.authPty?.write(password + '\r');
-  }
-
-  // ---------------- OpenConnect ----------------
-
-  private async spawnOpenconnect(profile: Profile): Promise<void> {
-    const pty = await import('node-pty');
-
-    const args = [
-      '-n', // non-interactive — sudo creds already cached, never prompts
-      'openconnect',
-      `--user=${profile.username}`,
-      `--reconnect-timeout=${profile.reconnectTimeout ?? 300}`,
-    ];
-
-    if (profile.noDtls !== false) {
-      args.push('--no-dtls');
-    }
-
-    if (!profile.useDefaultScript) {
-      const scriptPath = getBundledScriptPath();
-      if (scriptPath) {
-        args.push(`--script=${scriptPath}`);
-      }
-    }
-
-    args.push(profile.server);
-
-    this.ocPty = pty.spawn('sudo', args, {
+    this.ptyProcess = pty.spawn('sh', ['-c', script, 'occ-sudo-chain', ...ocArgs], {
       name: 'xterm-256color',
       cols: 80,
       rows: 30,
     });
 
-    this.ocPty.onData((data: string) => {
+    this.setState('waiting-sudo');
+
+    this.ptyProcess.onData((data: string) => {
       this.emit('output', data);
       this.appendToLogs(data);
-      const result = parseOpenConnectOutput(data);
-      if (result) {
-        this.setState(result.state, result.message);
-      }
+      this.handleData(data);
     });
 
-    this.ocPty.onExit(({ exitCode }: { exitCode: number }) => {
-      this.setState('disconnected');
+    this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
+      // If we never got to 'connected', this is an auth/startup failure,
+      // not a clean disconnect.
+      if (this.currentState !== 'connected' && this.currentState !== 'reconnecting') {
+        const msg = !this.sudoPassed
+          ? 'Sudo authentication failed'
+          : `openconnect exited before connecting (code ${exitCode})`;
+        this.setState('failed', msg);
+      } else {
+        this.setState('disconnected');
+      }
       this.emit('exit', exitCode);
       this.stopMonitoring();
     });
+
+    this.startMonitoring();
   }
 
-  /** Send input (VPN password, OTP) into the openconnect pty. */
+  /** Routes stdout/stderr chunks to the right parser depending on phase. */
+  private handleData(data: string): void {
+    if (!this.sudoPassed) {
+      if (data.includes(SUDO_OK_MARKER)) {
+        this.sudoPassed = true;
+        this.pushLogLine('[occ] sudo auth complete — openconnect starting');
+        // Re-parse the remainder of the chunk as openconnect output.
+        const tail = data.split(SUDO_OK_MARKER).pop() ?? '';
+        const result = parseOpenConnectOutput(tail);
+        if (result) this.setState(result.state, result.message);
+        return;
+      }
+      // Still in sudo auth phase. Recognize retry / fail patterns.
+      if (/Sorry, try again/i.test(data)) {
+        this.setState('waiting-sudo', 'Wrong password, try again');
+        return;
+      }
+      // The initial "Password:" prompt doesn't need special handling — UI
+      // is already showing sudo input since we setState('waiting-sudo') on
+      // spawn.
+      return;
+    }
+
+    // sudo phase is done; parse output as openconnect.
+    const result = parseOpenConnectOutput(data);
+    if (result) {
+      this.setState(result.state, result.message);
+    }
+  }
+
+  /** Send any input (sudo password, VPN password, OTP) to the active pty. */
   sendInput(text: string): void {
-    this.ocPty?.write(text + '\r');
+    this.ptyProcess?.write(text + '\r');
   }
-
-  // ---------------- Reconnect / disconnect ----------------
 
   /** SIGUSR2 → openconnect re-establishes with existing session (no re-auth). */
   reconnect(): boolean {
-    if (!this.ocPty) return false;
+    if (!this.ptyProcess) return false;
     try {
-      process.kill(this.ocPty.pid!, 'SIGUSR2');
+      process.kill(this.ptyProcess.pid!, 'SIGUSR2');
       this.pushLogLine('[occ] SIGUSR2 sent — requesting reconnect (no re-auth)');
       return true;
     } catch (e) {
@@ -194,17 +168,11 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
 
   disconnect(): void {
     this.stopMonitoring();
-    if (this.authPty) {
-      try { this.authPty.kill('SIGTERM'); } catch { /* may be dead */ }
-      this.authPty = null;
-    }
-    if (this.ocPty) {
-      try { this.ocPty.kill('SIGTERM'); } catch { /* may be dead */ }
-      this.ocPty = null;
+    if (this.ptyProcess) {
+      try { this.ptyProcess.kill('SIGTERM'); } catch { /* may be dead */ }
+      this.ptyProcess = null;
     }
   }
-
-  // ---------------- State + logs ----------------
 
   getState(): ConnectionState {
     return this.currentState;
@@ -224,6 +192,8 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     const parts = combined.split('\n');
     this.partialLine = parts.pop() ?? '';
     for (const line of parts) {
+      // Don't leak our marker into user-visible logs.
+      if (line.includes(SUDO_OK_MARKER)) continue;
       this.pushLogLine(line);
     }
   }
@@ -236,7 +206,7 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     this.emit('log', line);
   }
 
-  // ---------------- Monitoring (network change + wake-from-sleep) ----------------
+  // ---------------- Monitoring ----------------
 
   private startMonitoring(): void {
     this.lastInterface = getPhysicalDefaultInterface();
@@ -285,4 +255,18 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       this.reconnect();
     }
   }
+}
+
+function buildOpenconnectArgs(profile: Profile): string[] {
+  const args = [
+    `--user=${profile.username}`,
+    `--reconnect-timeout=${profile.reconnectTimeout ?? 300}`,
+  ];
+  if (profile.noDtls !== false) args.push('--no-dtls');
+  if (!profile.useDefaultScript) {
+    const scriptPath = getBundledScriptPath();
+    if (scriptPath) args.push(`--script=${scriptPath}`);
+  }
+  args.push(profile.server);
+  return args;
 }
