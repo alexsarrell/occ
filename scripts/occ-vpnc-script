@@ -16,15 +16,20 @@
 
 set -e
 
-# Unique service identifier so our entries are isolated from any other
-# VPN clients. Using TUNDEV for stability across reconnects.
+# Service identifier = the tunnel interface name (e.g. utun4). This is the
+# convention used by the stock vpnc-script and is what configd/mDNSResponder
+# expect: the Service's IPv4 dict carries InterfaceName=$TUNDEV, which makes
+# the resolver scope DNS queries for this Service through the tunnel. If we
+# use a synthetic ID (e.g. occ-utun4), configd won't associate the DNS
+# with the interface and DNS packets get routed via the physical default.
 if [ -n "${TUNDEV:-}" ]; then
-    SERVICE_ID="occ-${TUNDEV}"
+    SERVICE_ID="${TUNDEV}"
 else
     SERVICE_ID="occ-$$"
 fi
 
 DNS_KEY="State:/Network/Service/${SERVICE_ID}/DNS"
+IPV4_KEY="State:/Network/Service/${SERVICE_ID}/IPv4"
 STATE_DIR="${HOME}/.occ"
 STATE_FILE="${STATE_DIR}/last-script-state"
 
@@ -91,7 +96,28 @@ do_connect() {
         route add default -interface "${TUNDEV}" 2>/dev/null || true
     fi
 
-    # 4. DNS via scutil (Dynamic Store). This is the whole point of the script:
+    # 4. Register IPv4 dict for the tunnel Service. Without this, configd
+    #    doesn't treat our DNS entry as belonging to a real network service
+    #    and mDNSResponder won't scope queries through the tunnel — resolver
+    #    tries to reach INTERNAL_IP4_DNS via the physical default route and
+    #    fails. OverridePrimary=1 is only set in full-tunnel mode; in split
+    #    mode we must NOT override or it clobbers the physical default.
+    if [ "${FULL_TUNNEL}" = "1" ]; then
+        OVERRIDE_PRIMARY_LINE="d.add OverridePrimary # 1"
+    else
+        OVERRIDE_PRIMARY_LINE=""
+    fi
+    scutil <<EOF
+d.init
+d.add Addresses * ${INTERNAL_IP4_ADDRESS}
+d.add SubnetMasks * 255.255.255.255
+d.add InterfaceName ${TUNDEV}
+${OVERRIDE_PRIMARY_LINE}
+set ${IPV4_KEY}
+quit
+EOF
+
+    # 5. DNS via scutil (Dynamic Store). This is the whole point of the script:
     #    we never touch Setup:/... (persistent prefs).
     if [ -n "${INTERNAL_IP4_DNS:-}" ]; then
         # Build space-separated match domain list.
@@ -139,12 +165,26 @@ do_disconnect() {
     load_state
     log "disconnecting"
 
-    # Remove our DNS entry. Routes bound to the tunnel are auto-removed when the
-    # tunnel goes down, but the pinned VPN gateway route must be explicitly deleted.
+    # Remove our DNS + IPv4 entries. Routes bound to the tunnel are auto-removed
+    # when the tunnel goes down, but the pinned VPN gateway route must be
+    # explicitly deleted.
     scutil <<EOF 2>/dev/null || true
 remove ${DNS_KEY}
+remove ${IPV4_KEY}
 quit
 EOF
+
+    # Sweep any stale entries left by prior versions of this script that used
+    # a synthetic "occ-*" service id. Best effort, ignore errors.
+    STALE_KEYS=$(echo "list State:/Network/Service/occ-.*" | scutil 2>/dev/null | awk -F'= ' '/subKey/{print $2}')
+    if [ -n "${STALE_KEYS}" ]; then
+        {
+            echo "${STALE_KEYS}" | while read -r k; do
+                [ -n "$k" ] && echo "remove $k"
+            done
+            echo "quit"
+        } | scutil 2>/dev/null || true
+    fi
 
     if [ -n "${VPNGATEWAY:-}" ]; then
         route delete -host "${VPNGATEWAY}" 2>/dev/null || true
