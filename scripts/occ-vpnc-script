@@ -96,61 +96,48 @@ do_connect() {
         route add default -interface "${TUNDEV}" 2>/dev/null || true
     fi
 
-    # 4. Register IPv4 dict for the tunnel Service. Without this, configd
-    #    doesn't treat our DNS entry as belonging to a real network service
-    #    and mDNSResponder won't scope queries through the tunnel — resolver
-    #    tries to reach INTERNAL_IP4_DNS via the physical default route and
-    #    fails. OverridePrimary=1 is only set in full-tunnel mode; in split
-    #    mode we must NOT override or it clobbers the physical default.
-    if [ "${FULL_TUNNEL}" = "1" ]; then
-        OVERRIDE_PRIMARY_LINE="d.add OverridePrimary # 1"
-    else
-        OVERRIDE_PRIMARY_LINE=""
-    fi
+    # 4. Register IPv4 dict for the tunnel Service with OverridePrimary=1.
+    #    This makes configd treat utunX as the primary network service, so
+    #    its DNS becomes resolver #1 in `scutil --dns`. Without this, our
+    #    DNS sits as a low-priority secondary and Wi-Fi DNS answers NXDOMAIN
+    #    for VPN-only hosts before our resolver is queried at all.
+    #
+    #    Side note: OverridePrimary=1 changes configd's notion of primary
+    #    Service, NOT the kernel routing table. In split-tunnel mode we
+    #    don't add a default route via the tunnel, so the actual default
+    #    route stays via the physical interface — only DNS resolution is
+    #    promoted, which is what we want.
+    #
+    #    This mirrors the unconditional behavior of the stock vpnc-script
+    #    that ships with openconnect (the inline `if [ -z "$CISCO_DEF_DOMAIN" ]`
+    #    in that script is commented out, so OverridePrimary is always set).
     scutil <<EOF
 d.init
 d.add Addresses * ${INTERNAL_IP4_ADDRESS}
 d.add SubnetMasks * 255.255.255.255
 d.add InterfaceName ${TUNDEV}
-${OVERRIDE_PRIMARY_LINE}
+d.add OverridePrimary # 1
 set ${IPV4_KEY}
 quit
 EOF
 
-    # 5. DNS via scutil (Dynamic Store). This is the whole point of the script:
-    #    we never touch Setup:/... (persistent prefs).
+    # 5. DNS for the tunnel Service. ServerAddresses + (optional) SearchDomains
+    #    is enough: with OverridePrimary in IPv4 above, configd ranks this
+    #    resolver as primary automatically.
     if [ -n "${INTERNAL_IP4_DNS:-}" ]; then
-        # Build space-separated match domain list.
-        MATCH_DOMAINS=""
-        if [ -n "${CISCO_SPLIT_DNS:-}" ]; then
-            MATCH_DOMAINS=$(echo "${CISCO_SPLIT_DNS}" | tr ',' ' ')
-        fi
+        SEARCH_LINE=""
         if [ -n "${CISCO_DEF_DOMAIN:-}" ]; then
-            MATCH_DOMAINS="${MATCH_DOMAINS} ${CISCO_DEF_DOMAIN}"
+            # CISCO_DEF_DOMAIN is space-separated when openconnect parses
+            # multiple default-domain entries from the XML profile.
+            SEARCH_LINE="d.add SearchDomains * ${CISCO_DEF_DOMAIN}"
         fi
-
-        if [ -n "${MATCH_DOMAINS}" ]; then
-            # Split-DNS: supplemental resolver only for VPN domains. Wi-Fi DNS unchanged.
-            scutil <<EOF
+        scutil <<EOF
 d.init
 d.add ServerAddresses * ${INTERNAL_IP4_DNS}
-d.add SupplementalMatchDomains * ${MATCH_DOMAINS}
-d.add SupplementalMatchDomainsNoSearch * 0
+${SEARCH_LINE}
 set ${DNS_KEY}
 quit
 EOF
-        else
-            # No match domains from server: act as primary resolver, but still
-            # via Dynamic Store — reboot or network change wipes us.
-            scutil <<EOF
-d.init
-d.add ServerAddresses * ${INTERNAL_IP4_DNS}
-d.add PrimaryRank * first
-set ${DNS_KEY}
-quit
-EOF
-        fi
-
         # Kick mDNSResponder so it picks up the new config immediately.
         killall -HUP mDNSResponder 2>/dev/null || true
     fi
