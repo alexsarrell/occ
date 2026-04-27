@@ -3,7 +3,8 @@ import { Box, Text, useApp, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { loadConfig, updateProfile } from '../config/store.js';
 import { addKeychainPassword, deleteKeychainPassword, getKeychainPassword } from '../core/keychain.js';
-import { base32Encode, generate, parseMigrationUrl, secondsRemaining, type OtpEntry } from '../core/totp.js';
+import { generateFromUri, parseMigrationUrl, secondsRemaining, type OtpEntry } from '../core/totp.js';
+import qrcode from 'qrcode-terminal';
 
 void React;
 
@@ -11,9 +12,10 @@ interface Props {
   action?: string;
   arg1?: string;
   arg2?: string;
+  qr?: boolean;
 }
 
-export function TotpScreen({ action, arg1, arg2 }: Props) {
+export function TotpScreen({ action, arg1, arg2, qr }: Props) {
   switch (action) {
     case 'import':
       return <ImportFlow url={arg1} />;
@@ -25,6 +27,8 @@ export function TotpScreen({ action, arg1, arg2 }: Props) {
       return <ForgetFlow service={arg1} />;
     case 'show':
       return <ShowFlow profileName={arg1} />;
+    case 'uri':
+      return <UriFlow profileName={arg1} qr={!!qr} />;
     case 'list':
     default:
       return <ListFlow />;
@@ -149,20 +153,32 @@ function ImportFlow({ url }: { url?: string }) {
     if (!chosenEntry) return;
     setStep('saving');
     try {
-      const account = chosenEntry.name.includes(':')
-        ? chosenEntry.name.split(':')[0]
-        : chosenEntry.name;
-      const secretB32 = base32Encode(chosenEntry.secret);
-      addKeychainPassword(account, serviceName, secretB32);
+      // Store the full otpauth:// URI in Keychain — it's the standard form
+      // and carries algorithm/digits/period along with the secret, so we
+      // never have to assume defaults at generation time.
+      const stored = chosenEntry.uri;
+      const accounts: string[] = [];
       const attached: string[] = [];
-      for (const profileName of profilesToAttach) {
-        // Update profile to point at the keychain service. Account = profile.username
-        // (we keep one secret per service, account is the profile's VPN user).
-        updateProfile(profileName, { totpKeychainService: serviceName });
-        attached.push(profileName);
+
+      if (profilesToAttach.size > 0) {
+        const seen = new Set<string>();
+        for (const profileName of profilesToAttach) {
+          const profile = allProfiles.find(p => p.name === profileName)!;
+          if (!seen.has(profile.username)) {
+            addKeychainPassword(profile.username, serviceName, stored);
+            accounts.push(profile.username);
+            seen.add(profile.username);
+          }
+          updateProfile(profileName, { totpKeychainService: serviceName });
+          attached.push(profileName);
+        }
+      } else {
+        addKeychainPassword('default', serviceName, stored);
+        accounts.push('default');
       }
-      const code = generate(secretB32);
-      let msg = `Saved to Keychain (service=${serviceName}, account=${account}).\n`;
+
+      const code = generateFromUri(stored);
+      let msg = `Saved to Keychain (service=${serviceName}, account${accounts.length > 1 ? 's' : ''}=${accounts.join(', ')}).\n`;
       if (attached.length) {
         msg += `Linked to profile${attached.length > 1 ? 's' : ''}: ${attached.join(', ')}.\n`;
       } else {
@@ -316,17 +332,120 @@ function ShowFlow({ profileName }: { profileName?: string }) {
   const profile = loadConfig().profiles.find(p => p.name === profileName);
   if (!profile) return <Text color="red">Profile '{profileName}' not found.</Text>;
   if (!profile.totpKeychainService) return <Text color="yellow">Profile '{profileName}' has no TOTP linked.</Text>;
-  let secret: string;
+  let stored: string;
   try {
-    secret = getKeychainPassword(profile.username, profile.totpKeychainService);
+    stored = getKeychainPassword(profile.username, profile.totpKeychainService);
   } catch (e: any) {
     return <Text color="red">{e.message}</Text>;
   }
-  const code = generate(secret);
+  let code: string;
+  try {
+    code = generateFromUri(stored);
+  } catch (e: any) {
+    return <Text color="red">Failed to generate code: {e.message}</Text>;
+  }
+  // Diagnostic block: parse the URI back to surface every parameter so any
+  // "code mismatch" question can be answered without re-instrumenting code.
+  const uri = (() => { try { return new URL(stored); } catch { return null; } })();
+  const params = uri?.searchParams;
+  const algorithm = params?.get('algorithm') ?? 'SHA1';
+  const digits = params?.get('digits') ?? '6';
+  const period = params?.get('period') ?? '30';
+  const now = Math.floor(Date.now() / 1000);
   return (
     <Box flexDirection="column">
       <Text bold color="cyan">{code}</Text>
-      <Text dimColor>refreshes in {secondsRemaining()}s</Text>
+      <Text dimColor>refreshes in {secondsRemaining(Number(period))}s</Text>
+      <Text dimColor>--- diagnostic ---</Text>
+      <Text dimColor>service: {profile.totpKeychainService}</Text>
+      <Text dimColor>account: {profile.username}</Text>
+      <Text dimColor>algorithm: {algorithm}</Text>
+      <Text dimColor>digits: {digits}</Text>
+      <Text dimColor>period: {period}s</Text>
+      <Text dimColor>system time: {new Date().toISOString()} (unix={now}, window={Math.floor(now / Number(period))})</Text>
+    </Box>
+  );
+}
+
+/**
+ * Plain-text URI emitter — bypasses Ink so the output is just the URL with
+ * a trailing newline, safe to pipe to pbcopy / qrencode / anywhere.
+ * Returns process exit code.
+ */
+export function printUri(profileName?: string): number {
+  if (!profileName) {
+    process.stderr.write('Usage: occ totp uri <profile> [--qr]\n');
+    return 2;
+  }
+  const profile = loadConfig().profiles.find(p => p.name === profileName);
+  if (!profile) {
+    process.stderr.write(`Profile '${profileName}' not found.\n`);
+    return 1;
+  }
+  if (!profile.totpKeychainService) {
+    process.stderr.write(`Profile '${profileName}' has no TOTP linked.\n`);
+    return 1;
+  }
+  try {
+    const stored = getKeychainPassword(profile.username, profile.totpKeychainService);
+    process.stdout.write(stored + '\n');
+    return 0;
+  } catch (e: any) {
+    process.stderr.write(e.message + '\n');
+    return 1;
+  }
+}
+
+function UriFlow({ profileName, qr }: { profileName?: string; qr: boolean }) {
+  const { exit } = useApp();
+  const [output, setOutput] = useState<string | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!profileName) {
+      setError('Usage: occ totp uri <profile> [--qr]');
+      setTimeout(() => exit(), 50);
+      return;
+    }
+    const profile = loadConfig().profiles.find(p => p.name === profileName);
+    if (!profile) {
+      setError(`Profile '${profileName}' not found.`);
+      setTimeout(() => exit(), 50);
+      return;
+    }
+    if (!profile.totpKeychainService) {
+      setError(`Profile '${profileName}' has no TOTP linked.`);
+      setTimeout(() => exit(), 50);
+      return;
+    }
+    let stored: string;
+    try {
+      stored = getKeychainPassword(profile.username, profile.totpKeychainService);
+    } catch (e: any) {
+      setError(e.message);
+      setTimeout(() => exit(), 50);
+      return;
+    }
+
+    if (qr) {
+      // qrcode-terminal renders via callback; small=true gives compact half-block
+      // glyphs that scan reliably from a phone camera held ~20cm from screen.
+      qrcode.generate(stored, { small: true }, (rendered) => {
+        setOutput(rendered);
+        setTimeout(() => exit(), 50);
+      });
+    } else {
+      setOutput(stored);
+      setTimeout(() => exit(), 50);
+    }
+  }, [profileName, qr]);
+
+  if (error) return <Text color="red">{error}</Text>;
+  if (output === null) return <Text dimColor>…</Text>;
+  return (
+    <Box flexDirection="column">
+      <Text>{output}</Text>
+      {qr && <Text dimColor>Scan with Apple Passwords / Authy / Raivo / 1Password.</Text>}
     </Box>
   );
 }

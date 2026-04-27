@@ -23,7 +23,7 @@ import { CleanScreen } from './commands/clean.js';
 import { HotkeysScreen } from './commands/hotkeys.js';
 import { HealScreen } from './commands/heal.js';
 import { TouchIdScreen } from './commands/touchid.js';
-import { TotpScreen } from './commands/totp.js';
+import { TotpScreen, printUri } from './commands/totp.js';
 import { heal as runHeal } from './core/heal.js';
 
 // Auto-heal on every CLI startup (before commander parses). Silent if nothing
@@ -226,9 +226,10 @@ What it fixes:
 program
   .command('totp')
   .description('Manage TOTP codes for VPN profiles (auto-fill OTP at connect time)')
-  .argument('[action]', 'list | import | link | unlink | forget | show')
+  .argument('[action]', 'list | import | link | unlink | forget | show | uri')
   .argument('[arg1]', 'URL / profile name / keychain service (depends on action)')
   .argument('[arg2]', 'keychain service name (only for `link`)')
+  .option('--qr', 'render output as a QR code (uri only)')
   .addHelpText('after', `
 Examples:
   $ occ totp                              # list TOTP-linked profiles
@@ -238,6 +239,8 @@ Examples:
   $ occ totp unlink britain               # remove TOTP from a profile (keychain entry stays)
   $ occ totp forget occ-totp-justai       # delete a Keychain secret (must be unlinked first)
   $ occ totp show just-ai                 # print current 6-digit code (debug)
+  $ occ totp uri just-ai                  # print otpauth:// URI (export to other apps)
+  $ occ totp uri just-ai --qr             # render the URI as a QR in the terminal
 
 Migrating from Google Authenticator:
   1. Open Google Authenticator on your phone
@@ -253,8 +256,14 @@ Notes:
   - When 'totpKeychainService' is set on a profile, 'occ connect' auto-fills
     the OTP code instead of prompting.
 `)
-  .action((action?: string, arg1?: string, arg2?: string) => {
-    render(<TotpScreen action={action} arg1={arg1} arg2={arg2} />);
+  .action((action?: string, arg1?: string, arg2?: string, opts?: { qr?: boolean }) => {
+    // 'uri' without --qr is a pure text emit. Bypass Ink so the output is
+    // clean — no ANSI cursor-control bytes that would corrupt `| pbcopy`
+    // and no terminal-width line-wrapping in the middle of a URL.
+    if (action === 'uri' && !opts?.qr) {
+      process.exit(printUri(arg1));
+    }
+    render(<TotpScreen action={action} arg1={arg1} arg2={arg2} qr={opts?.qr} />);
   });
 
 program
