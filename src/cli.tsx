@@ -23,6 +23,7 @@ import { CleanScreen } from './commands/clean.js';
 import { HotkeysScreen } from './commands/hotkeys.js';
 import { HealScreen } from './commands/heal.js';
 import { TouchIdScreen } from './commands/touchid.js';
+import { TotpScreen } from './commands/totp.js';
 import { heal as runHeal } from './core/heal.js';
 
 // Auto-heal on every CLI startup (before commander parses). Silent if nothing
@@ -220,6 +221,40 @@ What it fixes:
 `)
   .action((action?: string, opts?: { silent?: boolean }) => {
     render(<HealScreen action={action} silent={opts?.silent} />);
+  });
+
+program
+  .command('totp')
+  .description('Manage TOTP codes for VPN profiles (auto-fill OTP at connect time)')
+  .argument('[action]', 'list | import | link | unlink | forget | show')
+  .argument('[arg1]', 'URL / profile name / keychain service (depends on action)')
+  .argument('[arg2]', 'keychain service name (only for `link`)')
+  .addHelpText('after', `
+Examples:
+  $ occ totp                              # list TOTP-linked profiles
+  $ occ totp import "otpauth-migration://..."  # import from Google Authenticator export
+  $ occ totp import                       # paste URL interactively
+  $ occ totp link just-ai occ-totp-justai # attach existing secret to another profile
+  $ occ totp unlink britain               # remove TOTP from a profile (keychain entry stays)
+  $ occ totp forget occ-totp-justai       # delete a Keychain secret (must be unlinked first)
+  $ occ totp show just-ai                 # print current 6-digit code (debug)
+
+Migrating from Google Authenticator:
+  1. Open Google Authenticator on your phone
+  2. Menu → "Transfer accounts" → "Export accounts"
+  3. Select your VPN entry, tap Continue — it shows a QR code
+  4. Scan/decode the QR to get an 'otpauth-migration://offline?data=...' URL
+  5. Run 'occ totp import "<url>"' — pick the entry, choose profiles to attach
+
+Notes:
+  - The base32 secret is stored in macOS Keychain only.
+  - Multiple profiles can share one secret by pointing to the same keychain
+    service (use 'link' to add more profiles after import).
+  - When 'totpKeychainService' is set on a profile, 'occ connect' auto-fills
+    the OTP code instead of prompting.
+`)
+  .action((action?: string, arg1?: string, arg2?: string) => {
+    render(<TotpScreen action={action} arg1={arg1} arg2={arg2} />);
   });
 
 program

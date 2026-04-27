@@ -4,6 +4,7 @@ import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import { OpenConnectManager } from '../core/openconnect.js';
 import { getKeychainPassword } from '../core/keychain.js';
+import { generate as generateTotp } from '../core/totp.js';
 import { startCaffeinate, stopCaffeinate } from '../core/caffeinate.js';
 import { resetDns } from '../core/dns.js';
 import { getProfile, getDefaultProfile } from '../config/store.js';
@@ -114,6 +115,20 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
           sendKeychainPassword();
           break;
         case 'waiting-otp':
+          // If the profile has a TOTP secret in Keychain, generate the code and
+          // send it automatically. Fall through to the manual prompt only if the
+          // secret is missing or unreadable — that way a misconfigured profile
+          // still lets the user type a code by hand instead of hanging.
+          if (profile.totpKeychainService) {
+            try {
+              const secret = getKeychainPassword(profile.username, profile.totpKeychainService);
+              manager.sendInput(generateTotp(secret));
+              setPhase('authenticating');
+              break;
+            } catch {
+              // fall through to manual entry
+            }
+          }
           setPhase('otp');
           break;
         case 'connected':

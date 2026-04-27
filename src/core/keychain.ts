@@ -33,3 +33,9 @@ export function hasKeychainPassword(account: string, service: string): boolean {
     return false;
   }
 }
+
+export function deleteKeychainPassword(account: string, service: string): void {
+  execFileSync('/usr/bin/security', [
+    'delete-generic-password', '-a', account, '-s', service,
+  ], { stdio: ['pipe', 'pipe', 'pipe'] });
+}
