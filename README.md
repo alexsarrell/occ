@@ -111,14 +111,72 @@ occ clean                        # nuke DNS to DHCP defaults
 - macOS Keychain (via `security` CLI) for secrets
 - Bundled vpnc-script using `scutil` Dynamic Store for split-DNS without persistence
 
-## Configuration
+## Configuration reference
+
+### Profile fields (`~/.occ/profiles.json`)
+
+| Field | Required | Default | Purpose |
+|---|---|---|---|
+| `name` | yes | — | Identifier used as `occ connect <name>` |
+| `server` | yes | — | VPN server URL, e.g. `https://vpn.example.com` |
+| `username` | yes | — | VPN login |
+| `keychainService` | yes | `openconnect` | Keychain service holding the VPN password (account = `username`) |
+| `noDtls` | no | `true` | Disable DTLS/UDP. More stable on flaky networks; rarely worth turning off |
+| `reconnectTimeout` | no | `300` | Seconds before openconnect gives up on auto-reconnect |
+| `useDefaultScript` | no | `false` | Fall back to openconnect's stock vpnc-script. Enable only when the VPN server requires persistent system-DNS overrides |
+| `totpKeychainService` | no | — | Keychain service holding the TOTP secret. When set, `occ connect` auto-fills the OTP code instead of prompting |
+
+### Top-level config
+
+| Field | Purpose |
+|---|---|
+| `profiles` | Array of profile objects |
+| `defaultProfile` | Profile name used when `occ connect` is invoked without arguments |
+
+### Example `profiles.json`
+
+```json
+{
+  "profiles": [
+    {
+      "name": "work",
+      "server": "https://vpn.example.com",
+      "username": "alex",
+      "keychainService": "openconnect",
+      "noDtls": true,
+      "reconnectTimeout": 600,
+      "totpKeychainService": "occ-totp-work"
+    },
+    {
+      "name": "lab",
+      "server": "https://lab-vpn.example.com",
+      "username": "alex",
+      "keychainService": "openconnect-lab"
+    }
+  ],
+  "defaultProfile": "work"
+}
+```
+
+### Files & state
 
 | Path | Purpose |
 |---|---|
-| `~/.occ/profiles.json` | VPN profile definitions (plain JSON, edit by hand if you want) |
-| `~/.occ/vpnc-script.log` | What the bundled vpnc-script did during connect/disconnect |
-| macOS Keychain (`openconnect` service) | VPN passwords |
-| macOS Keychain (`occ-totp-*` services) | TOTP secrets |
+| `~/.occ/profiles.json` | Profile definitions (plain JSON, safe to edit by hand) |
+| `~/.occ/vpnc-script.log` | What the bundled vpnc-script did on connect / disconnect |
+| `~/.occ/last-script-state` | Cached env from the last connect (used during disconnect cleanup) |
+| `~/.occ/.caffeinate.pid` | PID of the active `caffeinate` keeping the Mac awake |
+| Keychain `openconnect` service | VPN passwords (`account` = profile username) |
+| Keychain `occ-totp-*` services | TOTP secrets stored as full `otpauth://` URIs |
+| `/etc/pam.d/sudo_local` | Touch ID for sudo (managed by `occ touchid enable/disable`) |
+| `~/.config/skhd/skhdrc` | Global hotkeys (managed via `occ hotkeys`, only inside the `# BEGIN occ-managed` block — your other bindings stay intact) |
+| `~/Library/LaunchAgents/com.occ.heal.plist` | Auto-heal LaunchAgent (`occ heal install`) |
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OCC_CONFIG_DIR` | `~/.occ` | Override the directory for `profiles.json`, logs, and caffeinate state. Useful for tests and dev sandboxes |
 
 ## Development
 
