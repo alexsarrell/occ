@@ -10,8 +10,8 @@ auto-fill OTP codes, sane DNS handling, and zero leftover state when you
 disconnect.
 
 ```
-$ occ connect just-ai
-🟢 connected → just-ai (vpn.example.com)  q · Esc disconnect  Tab logs
+$ occ connect work
+🟢 connected → work (vpn.example.com)  q · Esc disconnect  Tab logs
 ```
 
 ## Install
@@ -29,7 +29,7 @@ Requires macOS, Node.js ≥ 18, [openconnect](https://www.infradead.org/openconn
 ```bash
 occ                              # first run: walks you through profile setup
 occ connect                      # connect to default profile
-occ connect just-ai              # connect to a named profile
+occ connect work              # connect to a named profile
 occ stop                         # disconnect
 ```
 
@@ -72,8 +72,8 @@ phone every time you connect.
 # 2. Decode the QR (Photo Booth + zbar, or any QR reader)
 occ totp import 'otpauth-migration://offline?data=...'
 
-occ totp show just-ai            # current code (debug)
-occ totp uri just-ai --qr        # render a QR to import the same secret into
+occ totp show work            # current code (debug)
+occ totp uri work --qr        # render a QR to import the same secret into
                                  # Apple Passwords / Authy / Raivo / 1Password
 ```
 
