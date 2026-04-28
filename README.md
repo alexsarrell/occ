@@ -1,45 +1,136 @@
 # @alexsarrell/occ
 
-OpenConnect VPN CLI for macOS with a rich terminal UI.
+[![npm](https://img.shields.io/npm/v/@alexsarrell/occ.svg)](https://www.npmjs.com/package/@alexsarrell/occ)
+[![license](https://img.shields.io/npm/l/@alexsarrell/occ.svg)](./LICENSE)
+[![node](https://img.shields.io/node/v/@alexsarrell/occ.svg)](https://nodejs.org)
+
+OpenConnect VPN CLI for macOS with a rich terminal UI. Native AnyConnect-quality
+behaviour without the bloat: Keychain-backed credentials, Touch ID for sudo,
+auto-fill OTP codes, sane DNS handling, and zero leftover state when you
+disconnect.
+
+```
+$ occ connect just-ai
+🟢 connected → just-ai (vpn.example.com)  q · Esc disconnect  Tab logs
+```
 
 ## Install
 
 ```bash
+brew install openconnect              # required runtime dependency
 npm install -g @alexsarrell/occ
+occ doctor                             # verify everything is wired up
 ```
 
-Requires [openconnect](https://www.infradead.org/openconnect/):
+Requires macOS, Node.js ≥ 18, [openconnect](https://www.infradead.org/openconnect/).
+
+## Quick start
 
 ```bash
-brew install openconnect
+occ                              # first run: walks you through profile setup
+occ connect                      # connect to default profile
+occ connect just-ai              # connect to a named profile
+occ stop                         # disconnect
 ```
 
-## Usage
+## Features
+
+### Profiles
+
+Multiple VPN endpoints, one default. Stored as plain JSON in `~/.occ/profiles.json`,
+passwords go to macOS Keychain only.
 
 ```bash
-# Interactive menu
-occ
-
-# Connect to a profile
-occ connect <profile>
-occ connect              # connects to default profile
-
-# Manage profiles
+occ profiles add                 # interactive wizard
 occ profiles list
-occ profiles add
-occ profiles edit <name>
-occ profiles delete <name>
-occ profiles default <name>
-
-# Other
-occ stop                 # disconnect VPN
-occ doctor               # check dependencies
-occ clean                # reset DNS settings
-occ clean --full         # also flush routing table
+occ profiles default britain     # set default
 ```
 
-## Requirements
+### Touch ID for sudo
 
-- macOS
-- Node.js >= 18
-- openconnect (`brew install openconnect`)
+`occ connect` needs root to create the tunnel. Instead of typing the password every
+time, enable Touch ID via PAM:
+
+```bash
+occ touchid enable               # adds pam_tid.so to /etc/pam.d/sudo_local
+                                 # also offers to install pam_reattach so Touch ID
+                                 # works in iTerm / tmux / pty (not just Terminal)
+```
+
+Once enabled, every sudo prompt — including `occ connect` — accepts the fingerprint
+sensor. Password fallback still works.
+
+### Auto-fill OTP from Keychain
+
+If your VPN requires a TOTP second factor, import the secret once and `occ connect`
+will generate codes automatically. No more juggling Google Authenticator on your
+phone every time you connect.
+
+```bash
+# 1. Export from Google Authenticator on your phone:
+#      menu → Transfer accounts → Export → save the QR
+# 2. Decode the QR (Photo Booth + zbar, or any QR reader)
+occ totp import 'otpauth-migration://offline?data=...'
+
+occ totp show just-ai            # current code (debug)
+occ totp uri just-ai --qr        # render a QR to import the same secret into
+                                 # Apple Passwords / Authy / Raivo / 1Password
+```
+
+Built on [`otpauth`](https://github.com/hectorm/otpauth) — supports SHA-1/256/512,
+6/8 digits, arbitrary period.
+
+### Global hotkeys
+
+Connect / disconnect VPN from anywhere via [skhd](https://github.com/koekeishiya/skhd):
+
+```bash
+occ hotkeys install              # ⌃⌥⌘C connect, ⌃⌥⌘D disconnect, ⌃⌥⌘V menu
+```
+
+### Sane DNS handling (no leftovers)
+
+The bundled vpnc-script writes only to scutil's Dynamic Store
+(`State:/Network/Service/<utun>/...`). Persistent network preferences in System
+Settings are never touched. So even on an ungraceful exit (kernel panic, battery
+loss, force-kill), your Wi-Fi DNS stays intact.
+
+For older installs that hit DNS zombies before this design, there's a safety net:
+
+```bash
+occ heal                         # one-shot fix
+occ heal install                 # LaunchAgent — runs on every login
+occ clean                        # nuke DNS to DHCP defaults
+```
+
+## Architecture
+
+- TypeScript + [Ink](https://github.com/vadimdemedes/ink) (React-in-terminal)
+- [`node-pty`](https://github.com/microsoft/node-pty) for openconnect interaction
+- [`otpauth`](https://github.com/hectorm/otpauth) for TOTP
+- macOS Keychain (via `security` CLI) for secrets
+- Bundled vpnc-script using `scutil` Dynamic Store for split-DNS without persistence
+
+## Configuration
+
+| Path | Purpose |
+|---|---|
+| `~/.occ/profiles.json` | VPN profile definitions (plain JSON, edit by hand if you want) |
+| `~/.occ/vpnc-script.log` | What the bundled vpnc-script did during connect/disconnect |
+| macOS Keychain (`openconnect` service) | VPN passwords |
+| macOS Keychain (`occ-totp-*` services) | TOTP secrets |
+
+## Development
+
+```bash
+git clone https://github.com/alexsarrell/occ.git
+cd occ
+npm install
+npm run build
+npm link                         # use your local build as the global `occ`
+npm test                         # vitest
+```
+
+## License
+
+[MIT](./LICENSE)

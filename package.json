@@ -13,6 +13,14 @@
     "anyconnect"
   ],
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexsarrell/occ.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alexsarrell/occ/issues"
+  },
+  "homepage": "https://github.com/alexsarrell/occ#readme",
   "bin": {
     "occ": "dist/cli.js"
   },
