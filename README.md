@@ -95,6 +95,12 @@ The bundled vpnc-script writes only to scutil's Dynamic Store
 Settings are never touched. So even on an ungraceful exit (kernel panic, battery
 loss, force-kill), your Wi-Fi DNS stays intact.
 
+For split tunnels, the VPN resolver is registered only for the corporate match
+domains; the tunnel does not claim macOS primary-network status. After a Wi-Fi
+change or wake, occ waits for a stable physical address before requesting one
+reconnect, and a successful reconnect reuses existing routes/DNS instead of
+rebuilding the whole network configuration.
+
 For older installs that hit DNS zombies before this design, there's a safety net:
 
 ```bash

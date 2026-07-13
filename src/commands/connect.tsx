@@ -6,7 +6,6 @@ import { OpenConnectManager } from '../core/openconnect.js';
 import { getKeychainPassword } from '../core/keychain.js';
 import { generateFromUri } from '../core/totp.js';
 import { startCaffeinate, stopCaffeinate } from '../core/caffeinate.js';
-import { resetDns } from '../core/dns.js';
 import { getProfile, getDefaultProfile } from '../config/store.js';
 import { StatusBadge } from '../components/StatusBadge.js';
 import { LogsFooter } from '../components/LogsFooter.js';
@@ -73,7 +72,6 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
     const cleanup = () => {
       manager.disconnect();
       stopCaffeinate();
-      resetDns();
     };
 
     const handleSignal = () => {
@@ -155,7 +153,6 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
         case 'disconnected':
           clearTimeout(timeout);
           stopCaffeinate();
-          resetDns();
           exit();
           break;
       }

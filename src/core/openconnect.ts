@@ -15,8 +15,10 @@ interface OpenConnectManagerEvents {
 
 const LOG_BUFFER_SIZE = 500;
 const NET_POLL_MS = 5_000;
+const NETWORK_STABLE_MS = 10_000;
 const WAKE_TICK_MS = 1_000;
 const WAKE_LAG_THRESHOLD_MS = 10_000;
+const RECONNECT_REQUEST_MIN_INTERVAL_MS = 30_000;
 
 /** Markers printed by our shell wrapper so the parser can tell when
  *  sudo-auth ends and openconnect begins. */
@@ -67,6 +69,10 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   private lastInterface: string | null = null;
   private lastIp: string | null = null;
   private lastTick = Date.now();
+  private observedNetworkKey: string | null = null;
+  private observedNetworkSince = 0;
+  private wakeReconnectPending = false;
+  private lastReconnectRequestAt = 0;
 
   async connect(profile: Profile): Promise<void> {
     const pty = await import('node-pty');
@@ -169,13 +175,24 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   /** SIGUSR2 → openconnect re-establishes with existing session (no re-auth). */
   reconnect(): boolean {
     if (!this.ptyProcess) return false;
+
+    const now = Date.now();
+    const elapsed = now - this.lastReconnectRequestAt;
+    if (this.lastReconnectRequestAt > 0 && elapsed < RECONNECT_REQUEST_MIN_INTERVAL_MS) {
+      const waitSeconds = Math.ceil((RECONNECT_REQUEST_MIN_INTERVAL_MS - elapsed) / 1_000);
+      this.pushLogLine(`[occ] reconnect request suppressed — retry available in ${waitSeconds}s`);
+      return false;
+    }
+
     try {
       process.kill(this.ptyProcess.pid!, 'SIGUSR2');
+      this.lastReconnectRequestAt = now;
       this.pushLogLine('[occ] SIGUSR2 sent — requesting reconnect (no re-auth)');
       return true;
     } catch (e) {
       try {
         execFileSync('sudo', ['-n', 'pkill', '-USR2', 'openconnect'], { stdio: 'pipe' });
+        this.lastReconnectRequestAt = now;
         this.pushLogLine('[occ] sudo -n pkill -USR2 sent — requesting reconnect');
         return true;
       } catch {
@@ -231,6 +248,10 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     this.lastInterface = getPhysicalDefaultInterface();
     this.lastIp = this.lastInterface ? getInterfaceIp(this.lastInterface) : null;
     this.lastTick = Date.now();
+    if (this.lastInterface && this.lastIp) {
+      this.observedNetworkKey = `${this.lastInterface}\u0000${this.lastIp}`;
+      this.observedNetworkSince = this.lastTick;
+    }
 
     this.netPollTimer = setInterval(() => this.checkNetworkChange(), NET_POLL_MS);
     this.wakeTickTimer = setInterval(() => this.checkWakeFromSleep(), WAKE_TICK_MS);
@@ -245,19 +266,66 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       clearInterval(this.wakeTickTimer);
       this.wakeTickTimer = null;
     }
+    this.observedNetworkKey = null;
+    this.observedNetworkSince = 0;
+    this.wakeReconnectPending = false;
   }
 
   private checkNetworkChange(): void {
     const iface = getPhysicalDefaultInterface();
     const ip = iface ? getInterfaceIp(iface) : null;
+    const now = Date.now();
+
+    // A transiently missing IP is exactly what happens while macOS is
+    // reassociating Wi-Fi. Sending SIGUSR2 in that window makes OpenConnect
+    // rewrite routes and DNS while the physical driver is still recovering.
+    // Wait for a usable network instead and let OpenConnect's own reconnect
+    // loop handle the outage.
+    if (!iface || !ip) {
+      if (this.observedNetworkKey !== null) {
+        this.pushLogLine('[occ] physical network unavailable — waiting for a stable address');
+      }
+      this.observedNetworkKey = null;
+      this.observedNetworkSince = 0;
+      return;
+    }
+
+    const networkKey = `${iface}\u0000${ip}`;
+    if (networkKey !== this.observedNetworkKey) {
+      this.observedNetworkKey = networkKey;
+      this.observedNetworkSince = now;
+      if (iface !== this.lastInterface || ip !== this.lastIp) {
+        this.pushLogLine(`[occ] new physical network observed (iface ${iface}, ip ${ip}) — waiting for stability`);
+      }
+      return;
+    }
+
+    if (now - this.observedNetworkSince < NETWORK_STABLE_MS) return;
 
     const ifaceChanged = iface !== this.lastInterface;
     const ipChanged = ip !== this.lastIp;
 
-    if ((ifaceChanged || ipChanged) && this.currentState === 'connected') {
-      this.pushLogLine(`[occ] network change detected (iface ${this.lastInterface}→${iface}, ip ${this.lastIp}→${ip}) — reconnecting`);
-      this.setState('reconnecting');
-      this.reconnect();
+    // If OpenConnect already noticed the outage and entered its own reconnect
+    // loop, adopt the new stable physical state without injecting SIGUSR2.
+    if (this.currentState !== 'connected') {
+      this.lastInterface = iface;
+      this.lastIp = ip;
+      this.wakeReconnectPending = false;
+      return;
+    }
+
+    if (ifaceChanged || ipChanged || this.wakeReconnectPending) {
+      const trigger = this.wakeReconnectPending
+        ? 'wake-from-sleep'
+        : `network change (iface ${this.lastInterface}→${iface}, ip ${this.lastIp}→${ip})`;
+      this.lastInterface = iface;
+      this.lastIp = ip;
+      this.wakeReconnectPending = false;
+      if (this.reconnect()) {
+        this.pushLogLine(`[occ] stable ${trigger} — reconnect requested`);
+        this.setState('reconnecting');
+      }
+      return;
     }
 
     this.lastInterface = iface;
@@ -268,10 +336,10 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     const now = Date.now();
     const lag = now - this.lastTick;
     this.lastTick = now;
-    if (lag > WAKE_LAG_THRESHOLD_MS && this.currentState !== 'idle' && this.currentState !== 'disconnected') {
-      this.pushLogLine(`[occ] wake-from-sleep detected (lag ${Math.round(lag / 1000)}s) — reconnecting`);
-      this.setState('reconnecting');
-      this.reconnect();
+    if (lag > WAKE_LAG_THRESHOLD_MS && this.currentState === 'connected') {
+      this.pushLogLine(`[occ] wake-from-sleep detected (lag ${Math.round(lag / 1000)}s) — waiting for stable network`);
+      this.wakeReconnectPending = true;
+      this.observedNetworkSince = now;
     }
   }
 }

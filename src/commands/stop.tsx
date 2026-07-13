@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Text, useApp } from 'ink';
 import { execFileSync } from 'node:child_process';
 import { stopOrphanedCaffeinate } from '../core/caffeinate.js';
-import { resetDns } from '../core/dns.js';
 
 export function StopScreen() {
   const { exit } = useApp();
@@ -36,7 +35,6 @@ export function StopScreen() {
     try {
       execFileSync('sudo', ['-n', 'pkill', '-TERM', 'openconnect'], { stdio: 'pipe' });
       stopOrphanedCaffeinate();
-      resetDns();
       setResult({ success: true, message: 'VPN disconnected' });
     } catch {
       setResult({

@@ -22,16 +22,21 @@ set -e
 # the resolver scope DNS queries for this Service through the tunnel. If we
 # use a synthetic ID (e.g. occ-utun4), configd won't associate the DNS
 # with the interface and DNS packets get routed via the physical default.
-if [ -n "${TUNDEV:-}" ]; then
-    SERVICE_ID="${TUNDEV}"
-else
-    SERVICE_ID="occ-$$"
-fi
-
-DNS_KEY="State:/Network/Service/${SERVICE_ID}/DNS"
-IPV4_KEY="State:/Network/Service/${SERVICE_ID}/IPv4"
 STATE_DIR="${HOME}/.occ"
 STATE_FILE="${STATE_DIR}/last-script-state"
+
+set_service_keys() {
+    if [ -n "${TUNDEV:-}" ]; then
+        SERVICE_ID="${TUNDEV}"
+    else
+        SERVICE_ID="occ-$$"
+    fi
+
+    DNS_KEY="State:/Network/Service/${SERVICE_ID}/DNS"
+    IPV4_KEY="State:/Network/Service/${SERVICE_ID}/IPv4"
+}
+
+set_service_keys
 
 log() {
     # Log to a file we can inspect; tee would interfere with openconnect's output capture.
@@ -56,6 +61,113 @@ load_state() {
         # shellcheck disable=SC1090
         . "${STATE_FILE}"
     fi
+}
+
+build_match_domains() {
+    MATCH_DOMAINS=""
+    if [ -n "${CISCO_SPLIT_DNS:-}" ]; then
+        MATCH_DOMAINS=$(echo "${CISCO_SPLIT_DNS}" | tr ',' ' ')
+    fi
+    if [ -n "${CISCO_DEF_DOMAIN:-}" ]; then
+        MATCH_DOMAINS="${MATCH_DOMAINS} ${CISCO_DEF_DOMAIN}"
+    fi
+    MATCH_DOMAINS=$(echo "${MATCH_DOMAINS}" | xargs)
+}
+
+configure_dynamic_store() {
+    build_match_domains
+
+    SEARCH_LINE=""
+    SUPPLEMENTAL_LINE=""
+    PRIMARY_RANK_LINE=""
+    OVERRIDE_PRIMARY_LINE=""
+    if [ -n "${MATCH_DOMAINS}" ]; then
+        SEARCH_LINE="d.add SearchDomains * ${MATCH_DOMAINS}"
+        SUPPLEMENTAL_LINE="d.add SupplementalMatchDomains * ${MATCH_DOMAINS}"
+    else
+        # Without match domains the VPN resolver must handle all queries.
+        PRIMARY_RANK_LINE="d.add PrimaryRank * First"
+    fi
+
+    # SupplementalMatchDomains is sufficient for split DNS. Claiming primary
+    # service status while the kernel default route remains on Wi-Fi creates
+    # contradictory reachability state in configd/wifianalyticsd. Only full
+    # tunnels (or servers without split-DNS domains) need OverridePrimary.
+    if [ "${FULL_TUNNEL:-0}" = "1" ] || [ -z "${MATCH_DOMAINS}" ]; then
+        OVERRIDE_PRIMARY_LINE="d.add OverridePrimary # 1"
+    fi
+
+    scutil <<EOF
+open
+d.init
+d.add Addresses * ${INTERNAL_IP4_ADDRESS}
+d.add SubnetMasks * 255.255.255.255
+d.add InterfaceName ${TUNDEV}
+${OVERRIDE_PRIMARY_LINE}
+set ${IPV4_KEY}
+d.init
+d.add ServerAddresses * ${INTERNAL_IP4_DNS:-}
+${SEARCH_LINE}
+${SUPPLEMENTAL_LINE}
+${PRIMARY_RANK_LINE}
+set ${DNS_KEY}
+close
+quit
+EOF
+
+    log "DNS configured: match-domains='${MATCH_DOMAINS}' servers='${INTERNAL_IP4_DNS:-}' override-primary='$([ -n "${OVERRIDE_PRIMARY_LINE}" ] && echo yes || echo no)'"
+}
+
+dynamic_store_key_exists() {
+    echo "show $1" | scutil 2>/dev/null | grep -q '<dictionary>'
+}
+
+refresh_vpn_gateway_route() {
+    load_state
+
+    NEW_DEFAULT_GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}' | head -1)
+    NEW_DEFAULT_IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}' | head -1)
+
+    # A full tunnel may own the default route. Prefer configd's physical
+    # primary service in that case, then fall back to the last known gateway.
+    case "${NEW_DEFAULT_IF:-}" in
+        utun*|ipsec*|ppp*|"")
+            GLOBAL_IPV4=$(echo "show State:/Network/Global/IPv4" | scutil 2>/dev/null || true)
+            PHYSICAL_GW=$(echo "${GLOBAL_IPV4}" | awk -F': ' '/Router :/{print $2; exit}')
+            PHYSICAL_IF=$(echo "${GLOBAL_IPV4}" | awk -F': ' '/PrimaryInterface :/{print $2; exit}')
+            NEW_DEFAULT_GW=${PHYSICAL_GW:-${ORIG_DEFAULT_GW:-}}
+            NEW_DEFAULT_IF=${PHYSICAL_IF:-${ORIG_DEFAULT_IF:-}}
+            ;;
+    esac
+
+    if [ -z "${VPNGATEWAY:-}" ] || [ -z "${NEW_DEFAULT_GW:-}" ]; then
+        log "gateway route refresh skipped: VPNGATEWAY='${VPNGATEWAY:-}' gateway='${NEW_DEFAULT_GW:-}'"
+        return 1
+    fi
+
+    CURRENT_ROUTE=$(route -n get "${VPNGATEWAY}" 2>/dev/null || true)
+    CURRENT_GW=$(echo "${CURRENT_ROUTE}" | awk '/gateway:/{print $2}' | head -1)
+    CURRENT_IF=$(echo "${CURRENT_ROUTE}" | awk '/interface:/{print $2}' | head -1)
+    if [ "${CURRENT_GW:-}" = "${NEW_DEFAULT_GW}" ] && \
+       { [ -z "${NEW_DEFAULT_IF:-}" ] || [ "${CURRENT_IF:-}" = "${NEW_DEFAULT_IF}" ]; }; then
+        ORIG_DEFAULT_GW="${NEW_DEFAULT_GW}"
+        ORIG_DEFAULT_IF="${NEW_DEFAULT_IF:-}"
+        save_state
+        log "VPN gateway route already current via ${ORIG_DEFAULT_GW} (${ORIG_DEFAULT_IF:-unknown})"
+        return 0
+    fi
+
+    route delete -host "${VPNGATEWAY}" 2>/dev/null || true
+    if route add -host "${VPNGATEWAY}" "${NEW_DEFAULT_GW}" 2>/dev/null; then
+        ORIG_DEFAULT_GW="${NEW_DEFAULT_GW}"
+        ORIG_DEFAULT_IF="${NEW_DEFAULT_IF:-}"
+        save_state
+        log "refreshed VPN gateway route ${VPNGATEWAY} via ${ORIG_DEFAULT_GW} (${ORIG_DEFAULT_IF:-unknown})"
+        return 0
+    fi
+
+    log "failed to refresh VPN gateway route ${VPNGATEWAY} via ${NEW_DEFAULT_GW}"
+    return 1
 }
 
 # ---------- connect / reconnect ----------
@@ -127,50 +239,7 @@ do_connect() {
     #    PrimaryRank=First or OverridePrimary alone is NOT enough — it
     #    only ranks the resolver, doesn't bind specific domains to it.
     #
-    #    Match domains come from CISCO_DEF_DOMAIN (space-separated list of
-    #    domains the corporate VPN considers "internal") and/or
-    #    CISCO_SPLIT_DNS (comma-separated). We accept both.
-    MATCH_DOMAINS=""
-    if [ -n "${CISCO_SPLIT_DNS:-}" ]; then
-        MATCH_DOMAINS=$(echo "${CISCO_SPLIT_DNS}" | tr ',' ' ')
-    fi
-    if [ -n "${CISCO_DEF_DOMAIN:-}" ]; then
-        MATCH_DOMAINS="${MATCH_DOMAINS} ${CISCO_DEF_DOMAIN}"
-    fi
-    # Trim whitespace.
-    MATCH_DOMAINS=$(echo "${MATCH_DOMAINS}" | xargs)
-
-    SEARCH_LINE=""
-    SUPPLEMENTAL_LINE=""
-    PRIMARY_RANK_LINE=""
-    if [ -n "${MATCH_DOMAINS}" ]; then
-        SEARCH_LINE="d.add SearchDomains * ${MATCH_DOMAINS}"
-        SUPPLEMENTAL_LINE="d.add SupplementalMatchDomains * ${MATCH_DOMAINS}"
-    else
-        # No match domains: fall back to making this resolver primary so
-        # everything still goes through VPN DNS.
-        PRIMARY_RANK_LINE="d.add PrimaryRank * First"
-    fi
-
-    scutil <<EOF
-open
-d.init
-d.add Addresses * ${INTERNAL_IP4_ADDRESS}
-d.add SubnetMasks * 255.255.255.255
-d.add InterfaceName ${TUNDEV}
-d.add OverridePrimary # 1
-set ${IPV4_KEY}
-d.init
-d.add ServerAddresses * ${INTERNAL_IP4_DNS:-}
-${SEARCH_LINE}
-${SUPPLEMENTAL_LINE}
-${PRIMARY_RANK_LINE}
-set ${DNS_KEY}
-close
-quit
-EOF
-
-    log "DNS configured: match-domains='${MATCH_DOMAINS}' servers='${INTERNAL_IP4_DNS:-}'"
+    configure_dynamic_store
 
     # Kick mDNSResponder so it picks up the new config immediately.
     killall -HUP mDNSResponder 2>/dev/null || true
@@ -179,10 +248,30 @@ EOF
     log "connected, DNS_KEY=${DNS_KEY}"
 }
 
+do_reconnect() {
+    load_state
+    set_service_keys
+    log "reconnected TUNDEV=${TUNDEV}"
+
+    # OpenConnect keeps the utun interface and routes across a successful
+    # reconnect. Re-running do_connect here used to churn hundreds of routes,
+    # rewrite configd state and HUP mDNSResponder during Wi-Fi recovery. Only
+    # restore Dynamic Store entries if a network event actually cleared them.
+    if dynamic_store_key_exists "${IPV4_KEY}" && dynamic_store_key_exists "${DNS_KEY}"; then
+        log "reconnect preserved network state; no reconfiguration needed"
+        return 0
+    fi
+
+    configure_dynamic_store
+    killall -HUP mDNSResponder 2>/dev/null || true
+    log "reconnect restored missing Dynamic Store state"
+}
+
 # ---------- disconnect ----------
 
 do_disconnect() {
     load_state
+    set_service_keys
     log "disconnecting"
 
     # Remove our DNS + IPv4 entries. Routes bound to the tunnel are auto-removed
@@ -232,13 +321,13 @@ case "${reason:-}" in
         do_disconnect
         ;;
     reconnect)
-        # openconnect re-established the TCP/DTLS session. Routes/interfaces
-        # are in the same state, but let's reassert DNS in case Dynamic Store
-        # was cleared by a network event.
-        do_connect
+        do_reconnect
         ;;
     attempt-reconnect)
-        : # best-effort, nothing to do
+        # The physical gateway may have changed (home Wi-Fi -> hotspot, wake,
+        # DHCP renewal). Refresh only the encrypted transport's host route;
+        # do not touch Wi-Fi, DNS or the utun interface during the attempt.
+        refresh_vpn_gateway_route || true
         ;;
     *)
         log "unknown reason: ${reason:-}"
