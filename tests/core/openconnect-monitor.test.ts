@@ -14,6 +14,14 @@ vi.mock('../../src/core/dns.js', () => ({
 }));
 
 import { OpenConnectManager } from '../../src/core/openconnect.js';
+import type { Profile } from '../../src/config/types.js';
+
+const profile: Profile = {
+  name: 'work',
+  server: 'https://vpn.example.com',
+  username: 'alex',
+  keychainService: 'openconnect',
+};
 
 function connectedManager(): any {
   const manager = new OpenConnectManager() as any;
@@ -98,5 +106,54 @@ describe('OpenConnect network recovery guardrails', () => {
     vi.advanceTimersByTime(30_000);
     expect(manager.reconnect()).toBe(true);
     expect(kill).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the old process to exit before a force restart', async () => {
+    const manager = connectedManager();
+    let exitHandler: (() => void) | undefined;
+    const oldProcess = {
+      pid: 4242,
+      kill: vi.fn(),
+      onExit: vi.fn((handler: () => void) => {
+        exitHandler = handler;
+        return { dispose: vi.fn() };
+      }),
+    };
+    manager.ptyProcess = oldProcess;
+    manager.connectionGeneration = 7;
+    const connect = vi.spyOn(manager, 'connect').mockResolvedValue(undefined);
+
+    expect(manager.forceRestart(profile)).toBe(true);
+    expect(oldProcess.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(connect).not.toHaveBeenCalled();
+    expect(manager.forceRestart(profile)).toBe(false);
+
+    exitHandler?.();
+    await Promise.resolve();
+
+    expect(connect).toHaveBeenCalledOnce();
+    expect(connect).toHaveBeenCalledWith(profile);
+  });
+
+  it('cancels a pending force restart on explicit disconnect', async () => {
+    const manager = connectedManager();
+    let exitHandler: (() => void) | undefined;
+    manager.ptyProcess = {
+      pid: 4242,
+      kill: vi.fn(),
+      onExit: vi.fn((handler: () => void) => {
+        exitHandler = handler;
+        return { dispose: vi.fn() };
+      }),
+    };
+    const connect = vi.spyOn(manager, 'connect').mockResolvedValue(undefined);
+
+    manager.forceRestart(profile);
+    manager.disconnect();
+    exitHandler?.();
+    await Promise.resolve();
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(manager.currentState).toBe('disconnected');
   });
 });

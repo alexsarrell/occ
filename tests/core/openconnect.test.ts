@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { extractGatewayHost } from '../../src/core/openconnect.js';
+import {
+  buildOpenconnectArgs,
+  extractGatewayHost,
+  PERSISTENT_RECONNECT_TIMEOUT_SECONDS,
+} from '../../src/core/openconnect.js';
+import type { Profile } from '../../src/config/types.js';
 
 describe('extractGatewayHost', () => {
   it('strips the https:// scheme', () => {
@@ -42,5 +47,26 @@ describe('extractGatewayHost', () => {
     expect(extractGatewayHost('')).toBeNull();
     // @ts-expect-error — guarding the runtime path for undefined
     expect(extractGatewayHost(undefined)).toBeNull();
+  });
+});
+
+describe('buildOpenconnectArgs', () => {
+  const profile: Profile = {
+    name: 'work',
+    server: 'https://vpn.example.com',
+    username: 'alex',
+    keychainService: 'openconnect',
+  };
+
+  it('retries for the lifetime of occ by default', () => {
+    expect(buildOpenconnectArgs(profile)).toContain(
+      `--reconnect-timeout=${PERSISTENT_RECONNECT_TIMEOUT_SECONDS}`,
+    );
+  });
+
+  it('preserves an explicitly configured finite reconnect timeout', () => {
+    expect(buildOpenconnectArgs({ ...profile, reconnectTimeout: 900 })).toContain(
+      '--reconnect-timeout=900',
+    );
   });
 });

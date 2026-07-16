@@ -19,6 +19,12 @@ const NETWORK_STABLE_MS = 10_000;
 const WAKE_TICK_MS = 1_000;
 const WAKE_LAG_THRESHOLD_MS = 10_000;
 const RECONNECT_REQUEST_MIN_INTERVAL_MS = 30_000;
+// OpenConnect 9.12 treats zero/negative values as "do not retry". INT_MAX is
+// effectively indefinite (~68 years) while still using the supported positive
+// timeout path. The process therefore survives arbitrarily long lid sleeps and
+// keeps the utun routes in place (traffic is blackholed, not leaked to Wi-Fi)
+// until the physical network comes back.
+export const PERSISTENT_RECONNECT_TIMEOUT_SECONDS = 2_147_483_647;
 
 /** Markers printed by our shell wrapper so the parser can tell when
  *  sudo-auth ends and openconnect begins. */
@@ -73,10 +79,15 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   private observedNetworkSince = 0;
   private wakeReconnectPending = false;
   private lastReconnectRequestAt = 0;
+  private connectionGeneration = 0;
+  private forceRestartPending = false;
+  private retiringProcess: IPty | null = null;
 
   async connect(profile: Profile): Promise<void> {
+    const generation = ++this.connectionGeneration;
     const pty = await import('node-pty');
     this.sudoPassed = false;
+    this.lastReconnectRequestAt = 0;
     this.setState('idle');
 
     const ocArgs = buildOpenconnectArgs(profile);
@@ -105,21 +116,28 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     // process, which matters for SIGUSR2-based reconnect later.
     const script = `sudo -v && echo "${SUDO_OK_MARKER}" && ${dropStaleRoute}exec sudo -n openconnect "$@"`;
 
-    this.ptyProcess = pty.spawn('sh', ['-c', script, 'occ-sudo-chain', ...ocArgs], {
+    const spawnedProcess = pty.spawn('sh', ['-c', script, 'occ-sudo-chain', ...ocArgs], {
       name: 'xterm-256color',
       cols: 80,
       rows: 30,
     });
+    this.ptyProcess = spawnedProcess;
 
     this.setState('waiting-sudo');
 
-    this.ptyProcess.onData((data: string) => {
+    spawnedProcess.onData((data: string) => {
+      if (generation !== this.connectionGeneration) return;
       this.emit('output', data);
       this.appendToLogs(data);
       this.handleData(data);
     });
 
-    this.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
+    spawnedProcess.onExit(({ exitCode }: { exitCode: number }) => {
+      // A force restart deliberately invalidates the old generation. Its exit
+      // must not emit "disconnected", otherwise ConnectScreen closes before
+      // the replacement process can ask for sudo/VPN authentication.
+      if (generation !== this.connectionGeneration) return;
+      if (this.ptyProcess === spawnedProcess) this.ptyProcess = null;
       // If we never got to 'connected', this is an auth/startup failure,
       // not a clean disconnect.
       if (this.currentState !== 'connected' && this.currentState !== 'reconnecting') {
@@ -203,11 +221,64 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   }
 
   disconnect(): void {
+    const restartWasPending = this.forceRestartPending;
+    this.forceRestartPending = false;
     this.stopMonitoring();
     if (this.ptyProcess) {
       try { this.ptyProcess.kill('SIGTERM'); } catch { /* may be dead */ }
       this.ptyProcess = null;
     }
+    if (this.retiringProcess) {
+      try { this.retiringProcess.kill('SIGTERM'); } catch { /* may be dead */ }
+      this.retiringProcess = null;
+    }
+    if (restartWasPending) this.setState('disconnected');
+  }
+
+  /**
+   * Fully stop the current OpenConnect process, wait for its cleanup script to
+   * finish, then start a fresh authenticated session without closing the Ink
+   * UI. This is intentionally different from SIGUSR2-based reconnect().
+   */
+  forceRestart(profile: Profile): boolean {
+    if (this.forceRestartPending) return false;
+    this.forceRestartPending = true;
+
+    const previousProcess = this.ptyProcess;
+    const previousGeneration = this.connectionGeneration;
+
+    const startReplacement = () => {
+      if (!this.forceRestartPending) return;
+      this.forceRestartPending = false;
+      this.retiringProcess = null;
+      void this.connect(profile).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.pushLogLine(`[occ] force restart failed: ${message}`);
+        this.setState('failed', `Could not restart OpenConnect: ${message}`);
+      });
+    };
+
+    if (!previousProcess) {
+      startReplacement();
+      return true;
+    }
+
+    // Invalidate the callbacks registered by connect() before terminating the
+    // old pty. A separate exit listener starts the replacement only after the
+    // old vpnc-script has finished removing its routes/DNS state.
+    this.connectionGeneration = previousGeneration + 1;
+    this.ptyProcess = null;
+    this.retiringProcess = previousProcess;
+    this.stopMonitoring();
+    this.pushLogLine('[occ] force restart requested — stopping old OpenConnect session');
+    previousProcess.onExit(() => startReplacement());
+
+    try {
+      previousProcess.kill('SIGTERM');
+    } catch {
+      startReplacement();
+    }
+    return true;
   }
 
   getState(): ConnectionState {
@@ -364,10 +435,10 @@ export function extractGatewayHost(server: string): string | null {
   return /^[A-Za-z0-9._-]+$/.test(s) ? s : null;
 }
 
-function buildOpenconnectArgs(profile: Profile): string[] {
+export function buildOpenconnectArgs(profile: Profile): string[] {
   const args = [
     `--user=${profile.username}`,
-    `--reconnect-timeout=${profile.reconnectTimeout ?? 300}`,
+    `--reconnect-timeout=${profile.reconnectTimeout ?? PERSISTENT_RECONNECT_TIMEOUT_SECONDS}`,
   ];
   if (profile.noDtls !== false) args.push('--no-dtls');
   if (!profile.useDefaultScript) {

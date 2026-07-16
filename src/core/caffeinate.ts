@@ -12,7 +12,11 @@ function pidFilePath(): string {
 
 export function startCaffeinate(): void {
   if (caffeinateProcess) return;
-  caffeinateProcess = spawn('caffeinate', ['-is'], {
+  // -i: prevent idle system sleep on battery and AC
+  // -s: prevent system sleep on AC
+  // -d: keep the display awake as well, so a black/locked screen is not
+  //     mistaken for sleep while a protected VPN session is active
+  caffeinateProcess = spawn('caffeinate', ['-d', '-i', '-s'], {
     stdio: 'ignore',
     detached: true,
   });

@@ -101,6 +101,12 @@ change or wake, occ waits for a stable physical address before requesting one
 reconnect, and a successful reconnect reuses existing routes/DNS instead of
 rebuilding the whole network configuration.
 
+While connected, occ prevents idle system sleep and display sleep. Closing a
+MacBook lid still causes hardware-level clamshell sleep, but occ keeps the VPN
+process alive with an effectively unlimited reconnect window and restores the
+tunnel when macOS wakes. During OpenConnect's reconnect loop, the split routes
+remain bound to the tunnel instead of falling back to the physical Wi-Fi route.
+
 For older installs that hit DNS zombies before this design, there's a safety net:
 
 ```bash
@@ -128,7 +134,7 @@ occ clean                        # nuke DNS to DHCP defaults
 | `username` | yes | — | VPN login |
 | `keychainService` | yes | `openconnect` | Keychain service holding the VPN password (account = `username`) |
 | `noDtls` | no | `true` | Disable DTLS/UDP. More stable on flaky networks; rarely worth turning off |
-| `reconnectTimeout` | no | `300` | Seconds before openconnect gives up on auto-reconnect |
+| `reconnectTimeout` | no | effectively unlimited | Seconds before openconnect gives up on auto-reconnect. Omit it to keep retrying for the lifetime of `occ`; set a finite value only when explicitly desired |
 | `useDefaultScript` | no | `false` | Fall back to openconnect's stock vpnc-script. Enable only when the VPN server requires persistent system-DNS overrides |
 | `totpKeychainService` | no | — | Keychain service holding the TOTP secret. When set, `occ connect` auto-fills the OTP code instead of prompting |
 

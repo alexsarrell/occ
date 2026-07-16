@@ -266,7 +266,10 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       managerRef.current?.disconnect();
     }
     if (ch === 'r' && phase === 'reconnecting' && reconnectHint) {
-      managerRef.current?.disconnect();
+      setReconnectHint(false);
+      reconnectEnteredAt.current = Date.now();
+      softRetriedRef.current = false;
+      managerRef.current?.forceRestart(profile!);
     }
   });
 
