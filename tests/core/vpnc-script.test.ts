@@ -183,6 +183,15 @@ describe('occ-vpnc-script network lifecycle', () => {
     expect(result.log).toContain("override-primary='yes'");
   });
 
+  it('replaces a stale VPN gateway route before adding the current route', () => {
+    const result = runVpncScript('connect');
+    const deleteIndex = result.trace.indexOf('route delete -host 203.0.113.10');
+    const addIndex = result.trace.indexOf('route add -host 203.0.113.10 192.168.0.1');
+
+    expect(deleteIndex).toBeGreaterThanOrEqual(0);
+    expect(addIndex).toBeGreaterThan(deleteIndex);
+  });
+
   it('refreshes only the VPN gateway host route before reconnecting', () => {
     const result = runVpncScript('attempt-reconnect', {
       state: savedState(),
@@ -212,6 +221,23 @@ describe('occ-vpnc-script network lifecycle', () => {
     expect(result.trace).not.toContain('route add -host');
     expect(result.state).toContain('ORIG_DEFAULT_GW=192.168.42.1');
     expect(result.state).toContain('ORIG_DEFAULT_IF=en7');
+    expect(result.log).toContain('VPN gateway route already current');
+  });
+
+  it('keeps the saved physical interface when the system primary is the tunnel', () => {
+    const result = runVpncScript('attempt-reconnect', {
+      state: savedState().replace('FULL_TUNNEL=0', 'FULL_TUNNEL=1'),
+      env: {
+        TEST_DEFAULT_IF: 'utun9',
+        TEST_GLOBAL_IF: 'utun9',
+        TEST_PINNED_GW: '192.168.0.1',
+        TEST_PINNED_IF: 'en0',
+      },
+    });
+
+    expect(result.trace).not.toContain('route delete -host');
+    expect(result.trace).not.toContain('route add -host');
+    expect(result.state).toContain('ORIG_DEFAULT_IF=en0');
     expect(result.log).toContain('VPN gateway route already current');
   });
 

@@ -188,9 +188,9 @@ export function ConnectScreen({ profileName }: { profileName?: string }) {
       const stuckFor = Date.now() - reconnectEnteredAt.current;
 
       if (!softRetriedRef.current && stuckFor > STUCK_RECONNECT_SOFT_MS) {
-        softRetriedRef.current = true;
-        managerRef.current?.reconnect();
-      } else if (stuckFor > STUCK_RECONNECT_HARD_MS) {
+        softRetriedRef.current = managerRef.current?.reconnect() ?? false;
+      }
+      if (stuckFor > STUCK_RECONNECT_HARD_MS) {
         setReconnectHint(true);
       }
     }, 5_000);

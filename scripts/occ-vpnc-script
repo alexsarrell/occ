@@ -135,6 +135,12 @@ refresh_vpn_gateway_route() {
             GLOBAL_IPV4=$(echo "show State:/Network/Global/IPv4" | scutil 2>/dev/null || true)
             PHYSICAL_GW=$(echo "${GLOBAL_IPV4}" | awk -F': ' '/Router :/{print $2; exit}')
             PHYSICAL_IF=$(echo "${GLOBAL_IPV4}" | awk -F': ' '/PrimaryInterface :/{print $2; exit}')
+            case "${PHYSICAL_IF:-}" in
+                utun*|ipsec*|ppp*|"")
+                    PHYSICAL_GW=""
+                    PHYSICAL_IF=""
+                    ;;
+            esac
             NEW_DEFAULT_GW=${PHYSICAL_GW:-${ORIG_DEFAULT_GW:-}}
             NEW_DEFAULT_IF=${PHYSICAL_IF:-${ORIG_DEFAULT_IF:-}}
             ;;
@@ -185,8 +191,11 @@ do_connect() {
     ifconfig "${TUNDEV}" inet "${INTERNAL_IP4_ADDRESS}" "${INTERNAL_IP4_ADDRESS}" mtu "${MTU}" up
 
     # 3. Routes. Pin VPN gateway via physical so tunnel packets don't try
-    #    to go through themselves.
+    #    to go through themselves. Delete by the exact IP OpenConnect supplied
+    #    first, so a stale route from an unclean prior session cannot keep its
+    #    old physical next-hop.
     if [ -n "${ORIG_DEFAULT_GW}" ] && [ -n "${VPNGATEWAY}" ]; then
+        route delete -host "${VPNGATEWAY}" 2>/dev/null || true
         route add -host "${VPNGATEWAY}" "${ORIG_DEFAULT_GW}" 2>/dev/null || true
     fi
 

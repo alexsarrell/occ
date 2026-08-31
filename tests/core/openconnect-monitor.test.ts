@@ -108,8 +108,35 @@ describe('OpenConnect network recovery guardrails', () => {
     expect(kill).toHaveBeenCalledTimes(2);
   });
 
+  it('retries a stable network change after the reconnect throttle expires', () => {
+    const manager = connectedManager();
+    const kill = vi.spyOn(process, 'kill').mockReturnValue(true);
+    manager.lastReconnectRequestAt = Date.now();
+    mocks.getPhysicalDefaultInterface.mockReturnValue('en7');
+    mocks.execFileSync.mockReturnValue('172.20.10.2\n');
+
+    manager.checkNetworkChange();
+    vi.advanceTimersByTime(10_000);
+    manager.checkNetworkChange();
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(manager.lastInterface).toBe('en0');
+    expect(manager.lastIp).toBe('192.168.0.20');
+
+    vi.advanceTimersByTime(20_000);
+    manager.checkNetworkChange();
+
+    expect(kill).toHaveBeenCalledOnce();
+    expect(kill).toHaveBeenCalledWith(4242, 'SIGUSR2');
+    expect(manager.currentState).toBe('reconnecting');
+    expect(manager.lastInterface).toBe('en7');
+    expect(manager.lastIp).toBe('172.20.10.2');
+  });
+
   it('waits for the old process to exit before a force restart', async () => {
     const manager = connectedManager();
+    const disposeData = vi.fn();
+    const disposeExit = vi.fn();
     let exitHandler: (() => void) | undefined;
     const oldProcess = {
       pid: 4242,
@@ -120,10 +147,13 @@ describe('OpenConnect network recovery guardrails', () => {
       }),
     };
     manager.ptyProcess = oldProcess;
-    manager.connectionGeneration = 7;
+    manager.dataSubscription = { dispose: disposeData };
+    manager.exitSubscription = { dispose: disposeExit };
     const connect = vi.spyOn(manager, 'connect').mockResolvedValue(undefined);
 
     expect(manager.forceRestart(profile)).toBe(true);
+    expect(disposeData).toHaveBeenCalledOnce();
+    expect(disposeExit).toHaveBeenCalledOnce();
     expect(oldProcess.kill).toHaveBeenCalledWith('SIGTERM');
     expect(connect).not.toHaveBeenCalled();
     expect(manager.forceRestart(profile)).toBe(false);

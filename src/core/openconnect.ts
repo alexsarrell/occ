@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
-import { type IPty } from 'node-pty';
+import { type IDisposable, type IPty } from 'node-pty';
 import { parseOpenConnectOutput, type ConnectionState } from './parser.js';
 import { getPhysicalDefaultInterface } from './dns.js';
 import { getBundledScriptPath } from './vpnc-script.js';
@@ -79,42 +79,24 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
   private observedNetworkSince = 0;
   private wakeReconnectPending = false;
   private lastReconnectRequestAt = 0;
-  private connectionGeneration = 0;
   private forceRestartPending = false;
   private retiringProcess: IPty | null = null;
+  private dataSubscription: IDisposable | null = null;
+  private exitSubscription: IDisposable | null = null;
 
   async connect(profile: Profile): Promise<void> {
-    const generation = ++this.connectionGeneration;
+    this.disposePtySubscriptions();
     const pty = await import('node-pty');
     this.sudoPassed = false;
     this.lastReconnectRequestAt = 0;
     this.setState('idle');
 
     const ocArgs = buildOpenconnectArgs(profile);
-    const gatewayHost = extractGatewayHost(profile.server);
-
-    // After sudo auth, before launching openconnect, drop any stale /32 host
-    // route pinning the VPN gateway IP to a previous network's router.
-    //
-    // openconnect installs this route itself (so the encrypted tunnel packets
-    // reach the gateway outside the tunnel) and removes it on a clean exit. But
-    // after a non-clean disconnect followed by a network change (home → office,
-    // Wi-Fi switch), it's left pointing at a now-unreachable next-hop. The TCP
-    // connect to the gateway then fails with EADDRNOTAVAIL ("Can't assign
-    // requested address") and openconnect exits before connecting — the
-    // intermittent "fixed only by a reboot" bug, since a reboot flushes the
-    // route table. We're about to (re)create this route anyway, so deleting it
-    // here is safe. sudo is warm from `sudo -v` in the same pty. `; true` keeps
-    // a "not in table" miss from breaking the && chain; the echo (logged into
-    // the logs tab) fires only when a stale route was actually removed.
-    const dropStaleRoute = gatewayHost
-      ? `{ sudo -n route -n delete -host ${gatewayHost} >/dev/null 2>&1 && echo "[occ] dropped stale gateway route to ${gatewayHost}"; true; } && `
-      : '';
 
     // Script passed via -c. Openconnect args go after -- as $1, $2, ...
     // `exec` replaces sh with sudo so pty.pid ends up pointing at the VPN
     // process, which matters for SIGUSR2-based reconnect later.
-    const script = `sudo -v && echo "${SUDO_OK_MARKER}" && ${dropStaleRoute}exec sudo -n openconnect "$@"`;
+    const script = `sudo -v && echo "${SUDO_OK_MARKER}" && exec sudo -n openconnect "$@"`;
 
     const spawnedProcess = pty.spawn('sh', ['-c', script, 'occ-sudo-chain', ...ocArgs], {
       name: 'xterm-256color',
@@ -125,18 +107,14 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
 
     this.setState('waiting-sudo');
 
-    spawnedProcess.onData((data: string) => {
-      if (generation !== this.connectionGeneration) return;
+    this.dataSubscription = spawnedProcess.onData((data: string) => {
       this.emit('output', data);
       this.appendToLogs(data);
       this.handleData(data);
     });
 
-    spawnedProcess.onExit(({ exitCode }: { exitCode: number }) => {
-      // A force restart deliberately invalidates the old generation. Its exit
-      // must not emit "disconnected", otherwise ConnectScreen closes before
-      // the replacement process can ask for sudo/VPN authentication.
-      if (generation !== this.connectionGeneration) return;
+    this.exitSubscription = spawnedProcess.onExit(({ exitCode }: { exitCode: number }) => {
+      this.disposePtySubscriptions();
       if (this.ptyProcess === spawnedProcess) this.ptyProcess = null;
       // If we never got to 'connected', this is an auth/startup failure,
       // not a clean disconnect.
@@ -235,6 +213,13 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     if (restartWasPending) this.setState('disconnected');
   }
 
+  private disposePtySubscriptions(): void {
+    this.dataSubscription?.dispose();
+    this.exitSubscription?.dispose();
+    this.dataSubscription = null;
+    this.exitSubscription = null;
+  }
+
   /**
    * Fully stop the current OpenConnect process, wait for its cleanup script to
    * finish, then start a fresh authenticated session without closing the Ink
@@ -245,8 +230,6 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
     this.forceRestartPending = true;
 
     const previousProcess = this.ptyProcess;
-    const previousGeneration = this.connectionGeneration;
-
     const startReplacement = () => {
       if (!this.forceRestartPending) return;
       this.forceRestartPending = false;
@@ -263,10 +246,10 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       return true;
     }
 
-    // Invalidate the callbacks registered by connect() before terminating the
-    // old pty. A separate exit listener starts the replacement only after the
-    // old vpnc-script has finished removing its routes/DNS state.
-    this.connectionGeneration = previousGeneration + 1;
+    // Detach the old process callbacks before terminating it. A separate exit
+    // listener starts the replacement only after the old vpnc-script has
+    // finished removing its routes/DNS state.
+    this.disposePtySubscriptions();
     this.ptyProcess = null;
     this.retiringProcess = previousProcess;
     this.stopMonitoring();
@@ -389,10 +372,10 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       const trigger = this.wakeReconnectPending
         ? 'wake-from-sleep'
         : `network change (iface ${this.lastInterface}→${iface}, ip ${this.lastIp}→${ip})`;
-      this.lastInterface = iface;
-      this.lastIp = ip;
-      this.wakeReconnectPending = false;
       if (this.reconnect()) {
+        this.lastInterface = iface;
+        this.lastIp = ip;
+        this.wakeReconnectPending = false;
         this.pushLogLine(`[occ] stable ${trigger} — reconnect requested`);
         this.setState('reconnecting');
       }
@@ -413,26 +396,6 @@ export class OpenConnectManager extends EventEmitter<OpenConnectManagerEvents> {
       this.observedNetworkSince = now;
     }
   }
-}
-
-/**
- * Pull the bare gateway host out of a profile's server string so we can target
- * `route delete` at it (e.g. "https://vpn-sls.just-ai.com" → "vpn-sls.just-ai.com",
- * "vpn-azr.tovie.ai" → "vpn-azr.tovie.ai").
- *
- * Returns null for anything that isn't a plain hostname or IPv4 literal: the
- * result is interpolated into a shell command, so we refuse to pass through any
- * character that could turn it into something other than a host. Skipping the
- * cleanup (null) is harmless — openconnect still manages the route itself.
- */
-export function extractGatewayHost(server: string): string | null {
-  let s = (server ?? '').trim();
-  s = s.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, ''); // strip scheme://
-  s = s.split('/')[0];                                 // strip /path
-  s = s.split('@').pop() ?? s;                         // strip user:pass@
-  s = s.replace(/^\[|\]$/g, '');                       // strip IPv6 brackets
-  s = s.replace(/:\d+$/, '');                          // strip :port
-  return /^[A-Za-z0-9._-]+$/.test(s) ? s : null;
 }
 
 export function buildOpenconnectArgs(profile: Profile): string[] {
